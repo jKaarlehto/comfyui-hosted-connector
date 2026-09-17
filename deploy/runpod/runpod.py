@@ -41,7 +41,7 @@ def main():
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--state-dir", type=Path, default=Path(".runpod"))
     parser.add_argument("--ref", default=DEFAULT_REF)
-    parser.add_argument("--comfy-ref", default="master")
+    parser.add_argument("--comfy-ref", default="stable")
     parser.add_argument("--pod")
     parser.add_argument("--name", default="ComfyUI-Notch")
     parser.add_argument("--instance-name", default="ComfyUI Notch (Runpod)")

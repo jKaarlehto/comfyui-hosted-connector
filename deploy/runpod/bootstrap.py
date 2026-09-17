@@ -8,12 +8,20 @@ import re
 import shlex
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 START_SHA256 = "a265753f3bf3f54b38a7badabe1656da414a5d50fa9abb4efe2fd2542e309084"
 GITHUB_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 _MODEL_STORE_SCRIPT = ""
 _PARK_SCRIPT = ""
+COMFY_UPDATE_SCRIPT = """
+echo "[Notch Runpod] Updating ComfyUI"
+git -C "$COMFYUI_DIR" fetch --quiet --depth=1 https://github.com/Comfy-Org/ComfyUI.git "$NOTCH_COMFY_REF" || exit $?
+git -C "$COMFYUI_DIR" checkout --quiet --detach FETCH_HEAD || exit $?
+echo "[Notch Runpod] ComfyUI revision $(git -C "$COMFYUI_DIR" rev-parse HEAD) ($NOTCH_COMFY_REF)"
+"""
 
 
 def main():
@@ -23,10 +31,7 @@ def main():
     revision = os.environ["NOTCH_PLUGIN_REF"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", revision):
         raise ValueError("NOTCH_PLUGIN_REF must be a branch, tag or commit SHA")
-    comfy_revision = os.environ.get("NOTCH_COMFY_REF", "master")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", comfy_revision):
-        raise ValueError("NOTCH_COMFY_REF must be a branch, tag or commit SHA")
-    os.environ["NOTCH_COMFY_REF"] = comfy_revision
+    os.environ["NOTCH_COMFY_REF"] = resolve_comfy_ref(os.environ.get("NOTCH_COMFY_REF", "stable"))
     encoded_key = os.environ.pop("NOTCH_GIT_KEY_B64")
     if "RUNPOD_SECRET" in encoded_key:
         raise RuntimeError("Runpod did not resolve the plugin deploy-key secret")
@@ -64,26 +69,7 @@ def main():
                 "UserKnownHostsFile=" + str(known),
             ]
         )
-        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-        subprocess.run(
-            [
-                "git",
-                "-C",
-                str(checkout),
-                "fetch",
-                "--quiet",
-                "--depth=1",
-                "git@github.com:" + repository + ".git",
-                revision,
-            ],
-            env=git_env,
-            check=True,
-            timeout=180,
-        )
-        subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", "FETCH_HEAD"], check=True)
-    actual = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
-    if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
-        raise RuntimeError("Plugin revision verification failed")
+        actual = checkout_plugin(checkout, repository, revision, git_env)
     print("[Notch Runpod] Plugin revision " + actual + " (" + revision + ")", flush=True)
     prepare_http_requirements(checkout / "requirements.txt", Path("/opt/notch-http-requirements.txt"))
 
@@ -120,13 +106,11 @@ def main():
             )
         os.environ["PUBLIC_KEY"] = "\n".join(keys)
     Path("/opt/notch-park.py").write_text(_PARK_SCRIPT, encoding="utf-8")
-    hook = """
-echo "[Notch Runpod] Updating ComfyUI"
-git -C "$COMFYUI_DIR" fetch --quiet --depth=1 https://github.com/Comfy-Org/ComfyUI.git "$NOTCH_COMFY_REF"
-git -C "$COMFYUI_DIR" checkout --quiet --detach FETCH_HEAD
-echo "[Notch Runpod] ComfyUI revision $(git -C "$COMFYUI_DIR" rev-parse HEAD)"
+    hook = (
+        COMFY_UPDATE_SCRIPT
+        + """
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
-    --constraint /opt/comfyui-runtime-constraints.txt -r "$COMFYUI_DIR/requirements.txt"
+    --constraint /opt/comfyui-runtime-constraints.txt -r "$COMFYUI_DIR/requirements.txt" || exit $?
 NOTCH_TARGET="$COMFYUI_DIR/custom_nodes/ComfyUI-Notch"
 if [ -e "$NOTCH_TARGET" ] && [ ! -f "$NOTCH_TARGET/.runpod-managed" ]; then
     echo "Refusing to replace an unmanaged ComfyUI-Notch installation" >&2
@@ -136,7 +120,7 @@ mkdir -p "$NOTCH_TARGET"
 rsync -a --delete --exclude=.git /opt/notch-plugin/ "$NOTCH_TARGET/"
 touch "$NOTCH_TARGET/.runpod-managed"
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
-    --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt
+    --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt || exit $?
 export NOTCH_AUTO_INSTALL=0
 if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
     python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode restore
@@ -146,6 +130,7 @@ echo "[Notch Runpod] Plugin ready; starting ComfyUI"
 python /opt/notch-park.py &
 python main.py $FIXED_ARGS &
 """
+    )
     source = startup.decode("utf-8").replace("--port 8188", "--port " + str(port))
     marker = "python main.py $FIXED_ARGS &"
     if source.count(marker) != 1:
@@ -153,6 +138,57 @@ python main.py $FIXED_ARGS &
     patched = Path("/opt/notch-start.sh")
     patched.write_text(source.replace(marker, hook), encoding="utf-8")
     os.execv("/bin/bash", ["/bin/bash", str(patched)])
+
+
+def resolve_comfy_ref(revision):
+    if revision != "stable":
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", revision):
+            raise ValueError("NOTCH_COMFY_REF must be stable, a branch, tag or commit SHA")
+        return revision
+    request = urllib.request.Request(
+        "https://api.github.com/repos/Comfy-Org/ComfyUI/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Hosted-ComfyUI-Connector"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            release = json.load(response)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeError):
+        raise RuntimeError(
+            "Could not resolve the latest stable ComfyUI release; retry startup or set --comfy-ref"
+        ) from None
+    if (
+        not isinstance(release, dict)
+        or release.get("draft") is not False
+        or release.get("prerelease") is not False
+        or not isinstance(release.get("tag_name"), str)
+        or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", release["tag_name"])
+    ):
+        raise RuntimeError("GitHub did not return a valid stable ComfyUI release")
+    return "refs/tags/" + release["tag_name"]
+
+
+def checkout_plugin(checkout, repository, revision, git_env):
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "git@github.com:" + repository + ".git",
+            revision,
+        ],
+        env=git_env,
+        check=True,
+        timeout=180,
+    )
+    subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", "FETCH_HEAD"], check=True)
+    actual = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
+        raise RuntimeError("Plugin revision verification failed")
+    return actual
 
 
 def prepare_http_requirements(source, target):

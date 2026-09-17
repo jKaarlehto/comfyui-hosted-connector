@@ -67,7 +67,7 @@ Pass settings to `runpod.py setup`; they are saved for subsequent commands. Re-r
 | `--volume-gb` | `32` | Pod volume capacity when using Pod storage. Global storage grows with usage. |
 | `--volume-id` | Created during setup | Reuse a particular global or network volume. |
 | `--ref` | `install-startup-requirements` | Plugin branch, tag or commit fetched at every start. Use a branch for automatic updates. |
-| `--comfy-ref` | `master` | ComfyUI branch, tag or commit fetched at every start. |
+| `--comfy-ref` | `stable` | Latest stable ComfyUI release, resolved at each start. Explicit branches, tags and commits are also supported. |
 | `--instance-name` | `ComfyUI Notch (Runpod)` | Advertised ComfyUI instance label. |
 | `--comfy-port` | `8188` | Remote ComfyUI port; only reachable through SSH. |
 | `--local-port` | `18188` | Owner's forwarded local port. The tester script also accepts `-LocalPort`. |
@@ -83,7 +83,9 @@ The starter manages one hosted workspace. If the stopped Pod's GPU is unavailabl
 
 Opening the WebUI or leaving an SSH tunnel connected does not prevent idle parking. Long-running generations are stopped if the maximum runtime is reached. Storage is flushed before parking; a failed flush is retried before stopping.
 
-The base image and its startup script are pinned and checked. This remote deployment uses HTTP transport and skips the plugin's `cuda-python` metapackage when installing its dependencies, preserving the base image's PyTorch-compatible CUDA bindings. The plugin's source requirements are left unchanged and its redundant startup installer is disabled in the deployment. Updates retain the image's pinned PyTorch/CUDA requirements. An incompatible upstream dependency update fails startup instead of silently replacing that stack. Startup logs show the actual ComfyUI and plugin commits.
+Every startup resolves `stable` through the official ComfyUI repository's latest-release API and fetches that exact release tag. Draft and prerelease releases are rejected. If the release cannot be resolved, startup fails instead of selecting a development branch. The plugin independently fetches its configured branch, tag or commit on every startup; its default remains `install-startup-requirements`. Logs show the resolved ComfyUI tag and both checked-out commits. Existing setups keep their saved ref; run `runpod.py setup --comfy-ref stable` and reapply the template to switch them.
+
+The base image and its startup script are pinned and checked. This remote deployment uses HTTP transport and skips the plugin's `cuda-python` metapackage when installing its dependencies, preserving the base image's PyTorch-compatible CUDA bindings. The plugin's source requirements are left unchanged and its redundant startup installer is disabled in the deployment. Updates retain the image's pinned PyTorch/CUDA requirements. An incompatible upstream dependency update fails startup instead of silently replacing that stack.
 
 ## Storage
 
