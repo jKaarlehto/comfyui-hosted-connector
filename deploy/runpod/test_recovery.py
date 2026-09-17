@@ -46,6 +46,7 @@ class Provider:
         self.delete_error = False
         self.backend_ready = True
         self.workers = 1
+        self.pagination = {"hasNextPage": False, "nextCursor": None}
 
     @property
     def state(self):
@@ -81,7 +82,7 @@ class Provider:
                 self.template["env"] = copy.deepcopy(body["env"])
                 return {"id": "template"}
         if path == "/pods" and method == "GET":
-            return {"pods": copy.deepcopy(list(self.pods.values()))}
+            return {"pods": copy.deepcopy(list(self.pods.values())), "pagination": copy.deepcopy(self.pagination)}
         parts = path.split("/")
         if len(parts) >= 3 and parts[1] == "pods":
             pod_id = parts[2]
@@ -142,6 +143,21 @@ class Provider:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_partial_inventory_retries_without_allocating_or_mutating(self):
+        for pagination in (
+            {"hasNextPage": True, "nextCursor": None},
+            {"hasNextPage": False, "nextCursor": "more"},
+        ):
+            for empty in (False, True):
+                with self.subTest(pagination=pagination, empty=empty):
+                    p = Provider()
+                    p.pagination = pagination
+                    if empty:
+                        p.pods.clear()
+                    self.assertEqual(p.connect()["state"], "starting")
+                    self.assertFalse(p.mutations())
+                    self.assertFalse(p.creates)
+
     def test_existing_pod_starts_without_allocation(self):
         p = Provider()
         p.start_error = None

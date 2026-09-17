@@ -67,7 +67,11 @@ class Recovery:
         self.refresh()
 
     def refresh(self):
-        pods = request(self.key, "GET", "/pods")["pods"]
+        inventory = request(self.key, "GET", "/pods")
+        pagination = inventory.get("pagination") or {}
+        if pagination.get("hasNextPage") or pagination.get("nextCursor"):
+            raise UncertainRequest("Runpod returned a partial Pod inventory")
+        pods = inventory["pods"]
         if not isinstance(pods, list) or any(not isinstance(pod, dict) or not pod.get("id") for pod in pods):
             raise RuntimeError("Runpod returned an incomplete Pod inventory")
         self.owned = {
