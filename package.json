@@ -1,0 +1,8 @@
+{
+  "name": "comfyui-hosted-connector",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node deploy/runpod/test_site.js"
+  }
+}

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Hosted ComfyUI</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="connect.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>Hosted ComfyUI</h1>
+    <p>Connect to the workspace you were invited to. Its WebUI will open when ready.</p>
+    <button id="connect" class="button primary" type="button" disabled>Connect</button>
+    <p id="status" class="note" role="status" aria-live="polite">Checking invitation…</p>
+    <details id="install-guide">
+      <summary>First time, or nothing opened?</summary>
+      <h2>Install the Windows connector</h2>
+      <ol>
+        <li><a id="download" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download the connector</a>.</li>
+        <li>Open the downloaded file. Look in your browser's downloads menu, usually near the upper right, or your Downloads folder.</li>
+        <li>Finish installation. This tab will try to continue automatically; click Connect if your browser asks.</li>
+      </ol>
+      <p id="download-status" class="note">Windows may ask you to confirm opening a downloaded application.</p>
+      <p id="appinstaller-option" hidden><a id="appinstaller-download" href="downloads/HostedComfyUI.appinstaller" download rel="noreferrer">App Installer download</a> is also available. Open the downloaded file to install.</p>
+      <button id="installed" class="button secondary" type="button">I installed it</button>
+    </details>
+    <p class="footnote">The connector starts the server and keeps a private local connection open for your browser and Notch. Startup can take a few minutes.</p>
+    <p class="footnote">Keep the connector open while working. Keep your invitation link private.</p>
+    <noscript><p>Enable JavaScript to pass your invitation to the connector.</p></noscript>
+  </main>
+</body>
+</html>
