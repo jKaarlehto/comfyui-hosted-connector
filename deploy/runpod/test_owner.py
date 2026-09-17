@@ -71,41 +71,167 @@ class OwnerTests(unittest.TestCase):
             bootstrap.configure_ssh(config)
             self.assertEqual(config.read_text(), "AllowTcpForwarding local\nAllowStreamLocalForwarding no\nPort 22\n")
 
-    def test_replace_rejects_running_pod_before_modifying_state(self):
-        state = {"pod_id": "old"}
-        args = types.SimpleNamespace(storage="global", pod="old")
-        with (
-            patch.object(runpod, "get_pod", return_value={"status": "RUNNING"}),
-            patch.object(runpod, "save_state") as save,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "Stop the Pod"):
-                runpod.prepare_replacement(args, "key", state, Path("unused"))
-        self.assertEqual(state, {"pod_id": "old"})
+    def test_resolver_adopts_only_owned_pod_and_preserves_other_state(self):
+        state = {"deployment_id": "setup", "pod_id": "old", "guests": {"tester": {}}}
+        pods = [
+            {"id": "other", "env": {"NOTCH_DEPLOYMENT_ID": "another-setup"}},
+            {"id": "new", "env": {"NOTCH_DEPLOYMENT_ID": "setup"}},
+        ]
+        with patch.object(runpod, "request", return_value=pods) as request, patch.object(runpod, "save_state") as save:
+            self.assertEqual(runpod.resolve_pod("key", state, Path("unused")), "new")
+        request.assert_called_once_with("key", "GET", "/pods", base="https://rest.runpod.io/v1")
+        self.assertEqual(state, {"deployment_id": "setup", "pod_id": "new", "guests": {"tester": {}}})
+        save.assert_called_once_with(Path("unused"), state)
+
+    def test_resolver_does_not_rewrite_current_or_missing_pod(self):
+        for pods, expected in (([{"id": "old", "env": {"NOTCH_DEPLOYMENT_ID": "setup"}}], "old"), ([], None)):
+            with self.subTest(expected=expected):
+                state = {"deployment_id": "setup", "pod_id": "old"}
+                with patch.object(runpod, "request", return_value=pods), patch.object(runpod, "save_state") as save:
+                    self.assertEqual(runpod.resolve_pod("key", state, Path("unused")), expected)
+                self.assertEqual(state, {"deployment_id": "setup", "pod_id": "old"})
+                save.assert_not_called()
+
+    def test_resolver_does_not_hide_retained_pod_duplicates(self):
+        state = {"deployment_id": "setup", "pod_id": "old", "previous_pods": ["old"]}
+        pods = [{"id": name, "env": {"NOTCH_DEPLOYMENT_ID": "setup"}} for name in ("old", "new")]
+        with patch.object(runpod, "request", return_value=pods), patch.object(runpod, "save_state") as save:
+            with self.assertRaisesRegex(RuntimeError, "Multiple Pods"):
+                runpod.resolve_pod("key", state, Path("unused"))
+        self.assertEqual(state, {"deployment_id": "setup", "pod_id": "old", "previous_pods": ["old"]})
         save.assert_not_called()
 
-    def test_replace_archives_stopped_pod_without_deleting_it(self):
-        state = {"pod_id": "old"}
-        args = types.SimpleNamespace(storage="global", pod="old")
-        with (
-            patch.object(runpod, "get_pod", return_value={"status": "EXITED"}),
-            patch.object(runpod, "save_state") as save,
-            patch.object(runpod, "request") as request,
-        ):
-            runpod.prepare_replacement(args, "key", state, Path("unused"))
-        self.assertEqual(state, {"previous_pods": ["old"]})
-        save.assert_called_once()
+    def test_resolver_refuses_invalid_or_incomplete_lists(self):
+        for response in (None, {"pods": [], "nextCursor": "more"}, [{}], [{"id": "new", "env": []}]):
+            with self.subTest(response=response):
+                state = {"deployment_id": "setup", "pod_id": "old"}
+                with patch.object(runpod, "request", return_value=response), patch.object(runpod, "save_state") as save:
+                    with self.assertRaisesRegex(RuntimeError, "invalid Pod list"):
+                        runpod.resolve_pod("key", state, Path("unused"))
+                self.assertEqual(state, {"deployment_id": "setup", "pod_id": "old"})
+                save.assert_not_called()
+
+    def test_resolver_failure_preserves_recorded_pod(self):
+        for operation in ("request", "save_state"):
+            with self.subTest(operation=operation):
+                state = {"deployment_id": "setup", "pod_id": "old"}
+                with (
+                    patch.object(
+                        runpod, "request", return_value=[{"id": "new", "env": {"NOTCH_DEPLOYMENT_ID": "setup"}}]
+                    ),
+                    patch.object(runpod, "save_state"),
+                    patch.object(runpod, operation, side_effect=RuntimeError("unavailable")),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "unavailable"):
+                        runpod.resolve_pod("key", state, Path("unused"))
+                self.assertEqual(state, {"deployment_id": "setup", "pod_id": "old"})
+
+    def test_default_owner_commands_follow_migrated_pod(self):
+        for command in ("status", "start", "stop", "connect", "sync", "terminate", "setup"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
+                state_file = Path(directory, "state.json")
+                state_file.write_text(json.dumps({"deployment_id": "setup", "pod_id": "old"}))
+                with (
+                    patch.object(sys, "argv", ["runpod.py", command, "--state-dir", directory]),
+                    patch.object(runpod, "api_key", return_value="key"),
+                    patch.object(runpod, "private_file"),
+                    patch.object(
+                        runpod, "request", return_value=[{"id": "new", "env": {"NOTCH_DEPLOYMENT_ID": "setup"}}]
+                    ) as request,
+                    patch.object(runpod, "get_pod", return_value={}) as get_pod,
+                    patch.object(runpod, "pod_action") as action,
+                    patch.object(runpod, "connect") as connect,
+                    patch.object(runpod, "sync_storage") as sync,
+                    patch.object(runpod, "setup") as setup,
+                    patch.object(sys, "stdout", new_callable=io.StringIO),
+                ):
+                    runpod.main()
+                self.assertEqual(
+                    json.loads(state_file.read_text()).get("pod_id"), None if command == "terminate" else "new"
+                )
+                if command == "status":
+                    get_pod.assert_called_once_with("key", "new")
+                elif command in ("start", "stop"):
+                    action.assert_called_once_with("key", "new", command)
+                elif command == "terminate":
+                    self.assertEqual(request.call_args.args, ("key", "DELETE", "/pods/new"))
+                else:
+                    called = {"connect": connect, "sync": sync, "setup": setup}[command]
+                    self.assertEqual(called.call_args.args[0].pod, "new")
+
+    def test_explicit_pod_command_never_rewrites_canonical_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory, "state.json")
+            original = json.dumps({"deployment_id": "setup", "pod_id": "old"})
+            state_file.write_text(original)
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["runpod.py", "terminate", "--pod", "old", "--storage", "pod", "--state-dir", directory],
+                ),
+                patch.object(runpod, "api_key", return_value="key"),
+                patch.object(runpod, "resolve_pod") as resolve,
+                patch.object(runpod, "save_state") as save,
+                patch.object(runpod, "request") as request,
+                patch.object(sys, "stdout", new_callable=io.StringIO),
+            ):
+                runpod.main()
+            self.assertEqual(state_file.read_text(), original)
+        request.assert_called_once_with("key", "DELETE", "/pods/old", base="https://rest.runpod.io/v1")
+        resolve.assert_not_called()
+        save.assert_not_called()
+
+    def test_deploy_recovers_unrecorded_pod_without_creating_another(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory, "state.json")
+            state_file.write_text(json.dumps({"deployment_id": "setup", "template_id": "template"}))
+            with (
+                patch.object(sys, "argv", ["runpod.py", "deploy", "--state-dir", directory]),
+                patch.object(runpod, "api_key", return_value="key"),
+                patch.object(runpod, "private_file"),
+                patch.object(
+                    runpod, "request", return_value=[{"id": "existing", "env": {"NOTCH_DEPLOYMENT_ID": "setup"}}]
+                ) as request,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "already has a Pod"):
+                    runpod.main()
+            self.assertEqual(json.loads(state_file.read_text())["pod_id"], "existing")
+        self.assertEqual(request.call_count, 1)
+
+    def test_replace_delegates_to_durable_starter_without_archiving_or_creating(self):
+        recovery = types.SimpleNamespace(replace_pod=lambda *args: {"state": "migrating"})
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory, "state.json")
+            original = json.dumps({"deployment_id": "setup", "pod_id": "old", "broker_id": "starter"})
+            state_file.write_text(original)
+            with (
+                patch.object(sys, "argv", ["runpod.py", "replace", "--state-dir", directory]),
+                patch.object(runpod, "api_key", return_value="key"),
+                patch.dict(sys.modules, {"recovery": recovery}),
+                patch.object(recovery, "replace_pod", return_value={"state": "migrating"}) as replace,
+                patch.object(runpod, "request") as request,
+                patch.object(runpod, "save_state") as save,
+                patch.object(sys, "stdout", new_callable=io.StringIO),
+            ):
+                runpod.main()
+            self.assertEqual(state_file.read_text(), original)
+        replace.assert_called_once_with("key", "starter")
         request.assert_not_called()
+        save.assert_not_called()
 
-    def test_recovery_ignores_retained_old_pod(self):
-        records = [{"id": name, "env": {"NOTCH_DEPLOYMENT_ID": "setup"}} for name in ("old", "new")]
-        with patch.object(runpod, "request", return_value={"pods": records}):
-            found = runpod.find_resource("key", "/pods", "pods", "setup", ["old"])
-        self.assertEqual(found["id"], "new")
-
-    def test_replacement_refuses_local_pod_storage(self):
-        args = types.SimpleNamespace(storage="pod", pod="old")
-        with self.assertRaisesRegex(RuntimeError, "cannot move"):
-            runpod.prepare_replacement(args, "key", {"pod_id": "old"}, Path("unused"))
+    def test_replace_requires_configured_starter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory, "state.json")
+            state_file.write_text(json.dumps({"deployment_id": "setup", "pod_id": "old"}))
+            with (
+                patch.object(sys, "argv", ["runpod.py", "replace", "--state-dir", directory]),
+                patch.object(runpod, "api_key", return_value="key"),
+                patch.object(runpod, "request") as request,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "hosted.py setup"):
+                    runpod.main()
+        request.assert_not_called()
 
     def test_ambiguous_template_create_recovers_without_duplicate(self):
         found = {"id": "existing", "env": {"NOTCH_DEPLOYMENT_ID": "our-setup"}}

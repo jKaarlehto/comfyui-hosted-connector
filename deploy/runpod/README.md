@@ -7,7 +7,7 @@ The owner deploys one private GPU Pod. Testers receive a dedicated invitation th
 ```text
 Public invitation page (static files; no login or backend)
     -> Windows connector receives the private invitation
-        -> starter key: asks Runpod to wake the fixed Pod
+        -> starter key: asks Runpod to wake the hosted workspace
         -> SSH key: opens the restricted tunnel to ComfyUI
             -> http://127.0.0.1:18188
                 -> browser and Notch use ordinary local HTTP
@@ -25,7 +25,8 @@ The link contains those two reusable tester keys. The connector handles authenti
 | Pod | `bootstrap.py` | Fetches ComfyUI and the private plugin at each start, installs requirements, restores files and starts ComfyUI. |
 | Pod | `model_store.py` | Mirrors completed models, workflows, inputs and outputs between local disk and the global volume. |
 | Pod | `park.py` | Flushes files and stops the Pod after the configured idle or runtime limit. |
-| Starter | `broker.py` | Accepts a connect request for the owner's fixed Pod, starts it if necessary and returns its SSH endpoint. |
+| Starter | `broker.py` | Accepts a connect request for the owner's workspace and returns its current SSH endpoint. |
+| Starter / Owner | `recovery.py` | Starts the Pod or requests native migration when its GPU is unavailable, verifies the result and retires the old Pod. |
 | Publisher | `prepare_site.py` / `publish_site.py` | Stages and publishes an explicit allowlist of public page and connector files. |
 
 ## Owner setup
@@ -78,7 +79,7 @@ Pass settings to `runpod.py setup`; they are saved for subsequent commands. Re-r
 
 `hosted.py setup --starter-idle-seconds 60` controls how long the CPU starter stays warm between requests. The default is 60 seconds, so polling during GPU startup does not repeatedly cold-start it. Its worker minimum is zero.
 
-The starter only wakes the single configured GPU Pod. It does not scale ComfyUI, create Pods or replace an unavailable Pod automatically.
+The starter manages one hosted workspace. If the stopped Pod's GPU is unavailable, it requests Runpod's native migration to the same GPU model and count. It does not scale the workspace or automatically upgrade its GPU.
 
 Opening the WebUI or leaving an SSH tunnel connected does not prevent idle parking. Long-running generations are stopped if the maximum runtime is reached. Storage is flushed before parking; a failed flush is retried before stopping.
 
@@ -94,7 +95,15 @@ Pod storage survives a stop/start but is deleted with the Pod. A network volume 
 
 Use `python deploy/runpod/runpod.py stop` to flush global storage and stop the Pod, or `python deploy/runpod/runpod.py terminate` to flush and remove it. `python deploy/runpod/runpod.py sync` requests an explicit flush while it is running.
 
-A stopped Pod does not reserve its GPU. If Runpod cannot start it because that host has no free GPU, retry later or use `python deploy/runpod/runpod.py replace` with global/network storage. Replacement keeps the old stopped Pod, deploys a new one using the same storage, and records the old ID in owner state. Run `python deploy/runpod/hosted.py setup` afterward to point the existing starter at the replacement; tester invitations remain tied to that starter. Validate the replacement before removing the old Pod with `python deploy/runpod/runpod.py terminate --pod OLD_ID`. Pod-local storage cannot be moved this way.
+## GPU recovery
+
+A stopped Pod does not reserve its GPU. During connection, the starter first tries to start the existing Pod. If that host has no free GPU, it requests [Runpod's native Pod migration](https://docs.runpod.io/pods/troubleshooting/pod-migration). When Runpod reports no available capacity, it retries at most once a minute while connection requests continue. The connector's startup timeout still applies.
+
+Migration creates a new Pod ID and SSH address. The starter keeps the source Pod until Runpod reports completion and the target's ownership, GPU, configuration, storage mounts and SSH endpoint have been verified. It then retires the source, leaving one ComfyUI Pod. A changed configuration or higher target price stops recovery for owner review. Existing invitation links continue to use the same starter; testers do not need new credentials. Owner commands resolve the current Pod by deployment identity rather than trusting a saved Pod ID.
+
+Use `python deploy/runpod/runpod.py replace` to request the same migration flow explicitly for a stopped Pod. It requires `hosted.py setup` to have configured the starter, which updates its current Pod automatically after successful recovery.
+
+The starter stores recovery progress and the migration ID in its endpoint environment as `NOTCH_RECOVERY`, so a CPU worker cold start can resume polling. If a migration request has an uncertain result and cannot be matched to an active migration, it does not submit another request blindly. The owner must inspect Runpod before retrying. Failed migrations retain the source Pod for that review.
 
 ## Tester connection
 
@@ -106,7 +115,7 @@ Presence requests contain only a fresh random nonce. The helper checks the page 
 
 The script-only alternative remains available:
 
-Double-click `start_hosted_comfyui.bat`, paste the invitation and wait for the progress steps. The script saves the invitation as `HOSTED_COMFYUI_ACCESS` in a protected `.env` file beside the launcher and reuses it on later launches. Keep that file private. It starts the fixed Pod through the starter and establishes an SSH tunnel bound only to loopback. The final window shows the WebUI link and the local address/port for Notch. Keep the launcher open while using the connection.
+Double-click `start_hosted_comfyui.bat`, paste the invitation and wait for the progress steps. The script saves the invitation as `HOSTED_COMFYUI_ACCESS` in a protected `.env` file beside the launcher and reuses it on later launches. Keep that file private. It connects through the starter and establishes an SSH tunnel bound only to loopback. The final window shows the WebUI link and the local address/port for Notch. Keep the launcher open while using the connection.
 
 For custom settings, run the PowerShell script with `-LocalPort` (default `18188`), `-StartupTimeoutMinutes` (default `15`) or `-EnvFile` (default `.env` beside the script).
 

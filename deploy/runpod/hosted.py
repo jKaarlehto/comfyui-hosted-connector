@@ -1,4 +1,4 @@
-"""Owner-only setup and tester invitations for a fixed-Pod serverless starter."""
+"""Owner-only setup and tester invitations for a hosted workspace."""
 
 import argparse
 import base64
@@ -54,12 +54,24 @@ def main():
             print(" ", name + pending)
         return
     key = owner.api_key(args.env_file)
+    if not owner.resolve_pod(key, state, state_file):
+        raise RuntimeError("No hosted Pod found; deploy one first")
     if args.command == "setup":
         setup(args, key, state, state_file)
     elif args.command == "share":
         invite(args, key, state, state_file)
     else:
         revoke(args, key, state, state_file)
+
+
+def starter_code():
+    bootstrap = "import subprocess,sys\nfrom pathlib import Path\n"
+    bootstrap += f"subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','--no-cache-dir','runpod=={SDK_VERSION}'],check=True)\n"
+    for name in ("broker.py", "recovery.py"):
+        source = Path(__file__).with_name(name).read_text(encoding="utf-8")
+        bootstrap += "Path('/opt/" + name + "').write_text(" + repr(source) + ")\n"
+    bootstrap += "subprocess.run([sys.executable,'-u','/opt/broker.py'],check=True)\n"
+    return json.dumps({"entrypoint": ["python3", "-u", "-c"], "cmd": [bootstrap]})
 
 
 def setup(args, key, state, state_file):
@@ -78,16 +90,11 @@ def setup(args, key, state, state_file):
     control_secret = secret(args, key, state, state_file, control_name, key)
     state["hosted_env"] = {"NOTCH_SSH_HOST_KEY_B64": "{{ RUNPOD_SECRET_" + host_secret + " }}"}
     owner.save_state(state_file, state)
-    broker = Path(__file__).with_name("broker.py").read_text(encoding="utf-8")
-    bootstrap = "import subprocess,sys\nfrom pathlib import Path\n"
-    bootstrap += f"subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','--no-cache-dir','runpod=={SDK_VERSION}'],check=True)\n"
-    bootstrap += "Path('/opt/broker.py').write_text(" + repr(broker) + ")\n"
-    bootstrap += "subprocess.run([sys.executable,'-u','/opt/broker.py'],check=True)\n"
     body = {
         "name": state["config"]["name"] + " starter",
         "type": "QUEUE",
         "image": BROKER_IMAGE,
-        "args": json.dumps({"entrypoint": ["python3", "-u", "-c"], "cmd": [bootstrap]}),
+        "args": starter_code(),
         "disk": 5,
         "cpu": [{"id": "cpu3c", "vcpuCount": 2}],
         "scaling": {"type": "QUEUE_DELAY", "queueDelay": 1},
@@ -103,9 +110,14 @@ def setup(args, key, state, state_file):
     }
     if state.get("broker_id"):
         body.pop("type")
+        current = owner.request(key, "GET", "/serverless/" + state["broker_id"])
+        body["env"]["NOTCH_STARTER_ID"] = state["broker_id"]
+        body["env"]["NOTCH_RECOVERY"] = current["env"].get("NOTCH_RECOVERY", "{}")
         endpoint = owner.request(key, "PATCH", "/serverless/" + state["broker_id"], body)
     else:
         endpoint = owner.create_resource(key, "/serverless", "endpoints", body, state["deployment_id"])
+        body["env"]["NOTCH_STARTER_ID"] = endpoint["id"]
+        owner.request(key, "PATCH", "/serverless/" + endpoint["id"], {"env": body["env"]})
     state["broker_id"] = endpoint["id"]
     state["hosted_config"] = {"starter_idle_seconds": args.starter_idle_seconds}
     owner.save_state(state_file, state)

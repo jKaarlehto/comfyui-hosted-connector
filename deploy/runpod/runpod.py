@@ -69,6 +69,9 @@ def main():
         parser.error("Disk sizes must be at least 10 GB and time limits must be non-negative")
     if not all(1 <= port <= 65535 for port in (args.comfy_port, args.local_port)):
         parser.error("Ports must be between 1 and 65535")
+    if args.pod and args.command in ("setup", "catalog", "deploy", "replace"):
+        parser.error("--pod applies only to commands that act on an existing Pod")
+    explicit_pod = args.pod is not None
     args.state_dir = args.state_dir.resolve()
     args.state_dir.mkdir(parents=True, exist_ok=True)
     state_file = args.state_dir / "state.json"
@@ -78,7 +81,8 @@ def main():
         save_state(state_file, state)
         args.secret_name = args.secret_name or "notch_" + state["deployment_id"][:12] + "_git"
     key = api_key(args.env_file)
-    args.pod = args.pod or state.get("pod_id")
+    if not explicit_pod and args.command not in ("catalog", "replace"):
+        args.pod = resolve_pod(key, state, state_file)
     if args.command == "setup":
         setup(args, key, state, state_file)
     elif args.command == "catalog":
@@ -88,19 +92,17 @@ def main():
                 indent=2,
             )
         )
-    elif args.command in ("deploy", "replace"):
+    elif args.command == "replace":
+        if not state.get("broker_id"):
+            raise RuntimeError("Run hosted.py setup before requesting Pod migration")
+        import recovery
+
+        print(json.dumps(recovery.replace_pod(key, state["broker_id"]), indent=2))
+    elif args.command == "deploy":
         if not state.get("template_id"):
             raise RuntimeError("Run setup before deploying a Pod")
-        if args.command == "replace":
-            prepare_replacement(args, key, state, state_file)
         if state.get("pod_id"):
             raise RuntimeError("This setup already has a Pod recorded; inspect it before deploying another")
-        existing = find_resource(key, "/pods", "pods", state["deployment_id"], state.get("previous_pods", []))
-        if existing:
-            state["pod_id"] = existing["id"]
-            save_state(state_file, state)
-            print("Recovered existing Pod:", existing["id"])
-            return
         body = {
             "name": args.name,
             "templateId": state["template_id"],
@@ -170,29 +172,37 @@ def main():
         if args.storage == "global":
             sync_storage(args, key)
         request(key, "DELETE", "/pods/" + args.pod, base="https://rest.runpod.io/v1")
-        if state.get("pod_id") == args.pod:
+        if not explicit_pod and state.get("pod_id") == args.pod:
             state.pop("pod_id")
             save_state(state_file, state)
         print("Terminated", args.pod)
 
 
-def prepare_replacement(args, key, state, state_file):
-    if args.storage not in ("global", "network"):
-        raise RuntimeError("Replacement requires global or network storage; Pod storage cannot move to another Pod")
-    pod_id = state.get("pod_id")
-    if not pod_id:
-        return
-    if args.pod != pod_id:
-        raise RuntimeError("Replacement applies only to this setup's recorded Pod")
-    pod = get_pod(key, pod_id)
-    if pod["status"] != "EXITED":
-        raise RuntimeError("Stop the Pod before replacing it")
-    previous = state.setdefault("previous_pods", [])
-    if pod_id not in previous:
-        previous.append(pod_id)
-    state.pop("pod_id")
-    save_state(state_file, state)
-    print("Retaining stopped Pod:", pod_id)
+def resolve_pod(key, state, state_file):
+    deployment_id = state.get("deployment_id")
+    if not deployment_id:
+        if state.get("pod_id"):
+            raise RuntimeError("This setup has no deployment identity; inspect the saved configuration")
+        return None
+    pods = request(key, "GET", "/pods", base="https://rest.runpod.io/v1")
+    if not isinstance(pods, list) or any(
+        not isinstance(pod, dict)
+        or not isinstance(pod.get("id"), str)
+        or not pod["id"]
+        or not isinstance(pod.get("env"), dict)
+        for pod in pods
+    ):
+        raise RuntimeError("Runpod returned an invalid Pod list; saved Pod is unchanged")
+    owned = [pod for pod in pods if pod["env"].get("NOTCH_DEPLOYMENT_ID") == deployment_id]
+    if len(owned) > 1:
+        raise RuntimeError("Multiple Pods belong to this setup; wait for migration or inspect the deployment")
+    if not owned:
+        return None
+    pod_id = owned[0]["id"]
+    if pod_id != state.get("pod_id"):
+        save_state(state_file, {**state, "pod_id": pod_id})
+        state["pod_id"] = pod_id
+    return pod_id
 
 
 def setup(args, key, state, state_file):
@@ -522,13 +532,9 @@ def create_resource(key, path, collection, body, deployment_id):
         raise
 
 
-def find_resource(key, path, collection, deployment_id, excluded_ids=()):
+def find_resource(key, path, collection, deployment_id):
     items = request(key, "GET", path)[collection]
-    owned = [
-        item
-        for item in items
-        if item.get("env", {}).get("NOTCH_DEPLOYMENT_ID") == deployment_id and item["id"] not in excluded_ids
-    ]
+    owned = [item for item in items if item.get("env", {}).get("NOTCH_DEPLOYMENT_ID") == deployment_id]
     if len(owned) > 1:
         raise RuntimeError("Multiple resources belong to this setup; inspect " + path)
     return owned[0] if owned else None
@@ -609,7 +615,7 @@ def request(key, method, path, data=None, base=API):
             detail = error.read().decode("utf-8", errors="replace")
             if "not enough free GPUs" in detail:
                 raise RuntimeError(
-                    "The stopped Pod's GPU is unavailable. Retry later or use replace with global/network storage."
+                    "The stopped Pod's GPU is unavailable. Retry later or use replace to request native migration."
                 ) from None
             raise RuntimeError(f"Runpod {method} {path}: HTTP {error.code}") from None
         except (urllib.error.URLError, TimeoutError):

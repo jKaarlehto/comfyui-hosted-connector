@@ -2,6 +2,8 @@
 
 Run a private ComfyUI server on Runpod and share access through individual invitation links. The Windows connector starts the server and opens an authenticated SSH tunnel. Notch and the browser connect to ordinary local HTTP at `127.0.0.1:18188`.
 
+If the stopped Pod's GPU is unavailable, the starter tries Runpod's native migration. It retires the old Pod after verifying the replacement, and existing invitation links continue to work. See [GPU recovery](deploy/runpod/README.md#gpu-recovery) for limits and owner controls.
+
 - **Owners:** open [manage_hosted_comfyui.bat](deploy/runpod/manage_hosted_comfyui.bat) for setup, server controls, invitations and revocation. See the [setup and usage guide](deploy/runpod/README.md) for prerequisites and defaults.
 - **Testers:** open the private invitation sent by the owner. The [connection page](https://jkaarlehto.github.io/comfyui-hosted-connector/) offers the connector installer when needed. Keep the connector open while using ComfyUI.
 
