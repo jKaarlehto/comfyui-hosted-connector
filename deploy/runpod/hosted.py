@@ -86,7 +86,7 @@ def main():
 
 def starter_source():
     bootstrap = "import subprocess,sys\nfrom pathlib import Path\n"
-    bootstrap += f"subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','--no-cache-dir','runpod=={SDK_VERSION}','paramiko==4.0.0'],check=True)\n"
+    bootstrap += f"subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','--no-cache-dir','runpod=={SDK_VERSION}'],check=True)\n"
     for name in ("broker.py", "recovery.py"):
         source = Path(__file__).with_name(name).read_text(encoding="utf-8")
         bootstrap += "Path('/opt/" + name + "').write_text(" + repr(source) + ")\n"
