@@ -377,6 +377,40 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "integrity"):
             self.store.restore(restored, self.remote)
         self.assertFalse((restored / "models" / "model.bin").exists())
+        self.assertFalse((restored / ".notch-store-state.json").exists())
+
+    def test_restored_files_skip_hashing_in_watch_and_final_sync(self):
+        (self.local / "models" / "model.bin").write_bytes(b"model-data")
+        self.store.sync(self.local, self.remote, minimum_age=0)
+        restored = Path(self.directory.name, "restored")
+        self.store.restore(restored, self.remote)
+        target = restored / "models" / "model.bin"
+        state = json.loads((restored / ".notch-store-state.json").read_text())
+        self.assertEqual(state["models/model.bin"], [target.stat().st_size, target.stat().st_mtime_ns])
+        with patch.object(self.store, "hash_file", side_effect=AssertionError("Unchanged file was rehashed")):
+            self.store.sync(restored, self.remote, minimum_age=30)
+            self.store.sync(restored, self.remote, minimum_age=0)
+
+    def test_restore_preserves_existing_state_and_modified_files(self):
+        (self.local / "models" / "model.bin").write_bytes(b"original")
+        (self.local / "models" / "new.bin").write_bytes(b"new")
+        self.store.sync(self.local, self.remote, minimum_age=0)
+        restored = Path(self.directory.name, "restored")
+        (restored / "models").mkdir(parents=True)
+        (restored / "models" / "model.bin").write_bytes(b"locally modified")
+        original_state = {"models/model.bin": [8, 1], "output/keep.png": [42, 123]}
+        state_path = restored / ".notch-store-state.json"
+        state_path.write_text(json.dumps(original_state))
+        self.store.restore(restored, self.remote)
+        state = json.loads(state_path.read_text())
+        for name, stamp in original_state.items():
+            self.assertEqual(state[name], stamp)
+        self.assertIn("models/new.bin", state)
+        self.assertEqual((restored / "models" / "model.bin").read_bytes(), b"locally modified")
+        self.store.sync(restored, self.remote, minimum_age=0)
+        verified = Path(self.directory.name, "verified")
+        self.store.restore(verified, self.remote)
+        self.assertEqual((verified / "models" / "model.bin").read_bytes(), b"locally modified")
 
     def test_explicit_sync_includes_files_with_a_future_timestamp(self):
         source = self.local / "models" / "model.bin"

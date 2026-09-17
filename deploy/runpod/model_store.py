@@ -48,10 +48,18 @@ def restore(local, store):
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = target.with_name(target.name + ".notch-restore-part")
         shutil.copyfile(store / "blobs" / digest, temporary)
-        if temporary.stat().st_size != record["size"] or hash_file(temporary) != digest:
+        verified = temporary.stat()
+        stamp = [verified.st_size, verified.st_mtime_ns]
+        if verified.st_size != record["size"] or hash_file(temporary) != digest:
             temporary.unlink()
             raise RuntimeError(f"Global model-store integrity check failed: {relative}")
         temporary.replace(target)
+        with (local / ".notch-store.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state_path = local / ".notch-store-state.json"
+            state = json.loads(state_path.read_text()) if state_path.exists() else {}
+            state[relative.as_posix()] = stamp
+            save_state(state_path, state)
         print(f"[Notch storage] Restored {relative}", flush=True)
 
 
@@ -86,10 +94,14 @@ def sync(local, store, minimum_age):
                 pointer = store / "files" / (hashlib.sha256(relative.encode()).hexdigest() + ".json")
                 pointer.write_text(json.dumps(record) + "\n")
                 state[relative] = stamp
-                temporary = state_path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(state) + "\n")
-                temporary.replace(state_path)
+                save_state(state_path, state)
                 print(f"[Notch storage] Saved {relative}", flush=True)
+
+
+def save_state(path, state):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state) + "\n")
+    temporary.replace(path)
 
 
 def hash_file(path):
