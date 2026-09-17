@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 import tempfile
 import urllib.error
@@ -15,6 +16,7 @@ from pathlib import Path
 START_SHA256 = "a265753f3bf3f54b38a7badabe1656da414a5d50fa9abb4efe2fd2542e309084"
 GITHUB_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 _MODEL_STORE_SCRIPT = ""
+_MODEL_CACHE_SCRIPT = ""
 _PARK_SCRIPT = ""
 _HEALTH_SCRIPT = ""
 COMFY_UPDATE_SCRIPT = """
@@ -79,6 +81,7 @@ def main():
         if not Path(store).is_mount():
             raise RuntimeError("The global volume is not mounted at " + store)
         Path("/opt/notch-model-store.py").write_text(_MODEL_STORE_SCRIPT, encoding="utf-8")
+        Path("/opt/notch-model-cache.py").write_text(_MODEL_CACHE_SCRIPT, encoding="utf-8")
     host_key = os.environ.pop("NOTCH_SSH_HOST_KEY_B64", "")
     if host_key:
         host_path = Path("/etc/ssh/ssh_host_ed25519_key")
@@ -146,7 +149,9 @@ python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt || exit $?
 export NOTCH_AUTO_INSTALL=0
 if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
-    python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode restore || exit $?
+    python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode prepare || exit $?
+    mkdir -p "$COMFYUI_DIR/custom_nodes/hosted_model_cache"
+    cp /opt/notch-model-cache.py "$COMFYUI_DIR/custom_nodes/hosted_model_cache/__init__.py" || exit $?
     touch /opt/notch-storage-restored
     python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode watch &
 fi
@@ -195,30 +200,43 @@ def resolve_comfy_ref(revision):
 
 
 def checkout_plugin(checkout, repository, revision, git_env):
-    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(checkout),
-            "fetch",
-            "--quiet",
-            "--depth=1",
-            "git@github.com:" + repository + ".git",
-            revision,
-        ],
-        env=git_env,
-        check=True,
-        timeout=180,
-    )
-    subprocess.run(
-        ["git", "-C", str(checkout), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
-        check=True,
-    )
-    actual = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
-    if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
-        raise RuntimeError("Plugin revision verification failed")
-    return actual
+    for attempt in range(3):
+        with tempfile.TemporaryDirectory(prefix="notch-checkout-", dir=checkout.parent) as directory:
+            stage = Path(directory, "plugin")
+            subprocess.run(["git", "init", "-q", str(stage)], check=True)
+            try:
+                fetch_plugin(stage, repository, revision, git_env)
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                if attempt == 2:
+                    raise
+                print("[Notch Runpod] Plugin fetch failed; retrying", flush=True)
+                continue
+            subprocess.run(
+                ["git", "-C", str(stage), "checkout", "--quiet", "--detach", "FETCH_HEAD"], check=True
+            )
+            actual = subprocess.check_output(["git", "-C", str(stage), "rev-parse", "HEAD"], text=True).strip()
+            if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
+                raise RuntimeError("Plugin revision verification failed")
+            if checkout.exists():
+                checkout.replace(Path(directory, "previous"))
+            stage.replace(checkout)
+            return actual
+
+
+def fetch_plugin(checkout, repository, revision, git_env):
+    command = ["git", "-C", str(checkout), "fetch", "--quiet", "--depth=1", "git@github.com:" + repository + ".git", revision]
+    with subprocess.Popen(command, env=git_env, start_new_session=os.name == "posix") as process:
+        try:
+            result = process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait()
+            raise
+        if result:
+            raise subprocess.CalledProcessError(result, command)
 
 
 def prepare_http_requirements(source, target):

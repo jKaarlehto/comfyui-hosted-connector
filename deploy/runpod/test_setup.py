@@ -102,7 +102,8 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(json.loads(payload["env"]["NOTCH_RECOVERY"])["attempt"], "owned")
             self.assertIn("/opt/notch-health.py", payload["args"])
             self.assertIn("Report hosted workspace readiness", payload["args"])
-            self.assertIn("--mode restore || exit $?", payload["args"])
+            self.assertIn("--mode prepare || exit $?", payload["args"])
+            self.assertIn("/hosted_comfyui/storage", payload["args"])
 
 
 if __name__ == "__main__":

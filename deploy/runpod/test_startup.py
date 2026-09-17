@@ -119,6 +119,34 @@ class GitStartupTests(unittest.TestCase):
         self.assertEqual((self.checkout / "version.txt").read_text(), "plugin updated")
         self.assertEqual(bootstrap.checkout_plugin(self.checkout, "test/plugin", first, env), first)
 
+    def test_plugin_fetch_retries_in_fresh_checkout_and_ignores_old_locks(self):
+        self.checkout.mkdir()
+        (self.checkout / ".git").mkdir()
+        (self.checkout / ".git/shallow.lock").touch()
+        original = bootstrap.fetch_plugin
+        attempts = []
+
+        def fetch(stage, *args):
+            attempts.append(stage)
+            if len(attempts) == 1:
+                (stage / ".git/shallow.lock").touch()
+                raise subprocess.TimeoutExpired("git", 60)
+            return original(stage, *args)
+
+        with patch.object(bootstrap, "fetch_plugin", side_effect=fetch):
+            bootstrap.checkout_plugin(self.checkout, "test/plugin", "main", self.local_remote_env("git@github.com:test/plugin.git"))
+        self.assertNotEqual(attempts[0], attempts[1])
+        self.assertFalse((self.checkout / ".git/shallow.lock").exists())
+        self.assertEqual((self.checkout / "version.txt").read_text(), "main")
+
+    def test_fetch_timeout_kills_ssh_children_before_returning(self):
+        with patch.object(bootstrap.subprocess, "Popen") as popen, patch.object(bootstrap.os, "name", "posix"), patch.object(bootstrap.os, "killpg", create=True) as kill, patch.object(bootstrap.signal, "SIGKILL", 9, create=True):
+            process = popen.return_value.__enter__.return_value
+            process.wait.side_effect = [subprocess.TimeoutExpired("git", 60), 0]
+            with self.assertRaises(subprocess.TimeoutExpired):
+                bootstrap.fetch_plugin(self.checkout, "test/plugin", "main", {})
+            kill.assert_called_once_with(process.pid, bootstrap.signal.SIGKILL)
+
     def test_comfy_hook_fails_before_startup_on_fetch_or_checkout_failure(self):
         git_root = Path(shutil.which("git")).resolve().parents[1]
         bundled_bash = git_root / "bin/bash.exe"

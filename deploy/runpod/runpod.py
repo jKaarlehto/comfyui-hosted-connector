@@ -274,6 +274,9 @@ def setup(args, key, state, state_file):
     store_script = Path(__file__).with_name("model_store.py").read_text(encoding="utf-8")
     bootstrap = bootstrap.replace('_MODEL_STORE_SCRIPT = ""', "_MODEL_STORE_SCRIPT = " + repr(store_script))
     bootstrap = bootstrap.replace(
+        '_MODEL_CACHE_SCRIPT = ""', "_MODEL_CACHE_SCRIPT = " + repr(Path(__file__).with_name("model_cache.py").read_text(encoding="utf-8"))
+    )
+    bootstrap = bootstrap.replace(
         '_PARK_SCRIPT = ""', "_PARK_SCRIPT = " + repr(Path(__file__).with_name("park.py").read_text(encoding="utf-8"))
     )
     bootstrap = bootstrap.replace(

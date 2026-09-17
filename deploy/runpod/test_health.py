@@ -22,6 +22,7 @@ class HealthTests(unittest.TestCase):
         self.routes = {
             "/system_stats": {"system": {"comfyui_version": "0.36.0"}},
             "/features": {"extension": {"notch": {"output_transports": ["disk", "http"]}}},
+            "/hosted_comfyui/storage": {"phase": "idle"},
         }
         routes = self.routes
 
@@ -74,6 +75,10 @@ class HealthTests(unittest.TestCase):
             with self.subTest(reply=reply):
                 self.routes["/features"] = reply
                 self.assertEqual(self.check(), {"ready": False})
+
+    def test_missing_model_cache_extension_is_not_ready(self):
+        self.routes["/hosted_comfyui/storage"] = {}
+        self.assertEqual(self.check(), {"ready": False})
 
     def test_bad_config_is_not_ready_and_cannot_choose_remote_host(self):
         for name, value in (("port", 0), ("port", 65536), ("port", True), ("port", "8188"),

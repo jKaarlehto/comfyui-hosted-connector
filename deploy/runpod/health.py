@@ -32,6 +32,9 @@ def check(config_path=Path("/opt/notch-health.json"), marker_path=Path("/opt/not
         transports = get_json(port, "/features")["extension"]["notch"]["output_transports"]
         if not isinstance(transports, list) or "http" not in transports:
             return {"ready": False}
+        storage = get_json(port, "/hosted_comfyui/storage")
+        if not isinstance(storage, dict) or storage.get("phase") not in ("idle", "downloading", "verifying", "error"):
+            return {"ready": False}
         return {"ready": True, "pod_id": config["pod_id"], "deployment_id": config["deployment_id"]}
     except (OSError, ValueError, KeyError, TypeError):
         return {"ready": False}

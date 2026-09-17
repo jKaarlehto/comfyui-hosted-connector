@@ -23,7 +23,8 @@ The link contains those two reusable tester keys. The connector handles authenti
 | Tester | `start_hosted_comfyui.bat` | Opens the launcher, accepts an invitation, starts the Pod, and keeps the connection window open. |
 | Tester | `start_hosted_comfyui.ps1` | Implements progress, credential storage, SSH forwarding and the clickable WebUI link. The batch file launches it. |
 | Pod | `bootstrap.py` | Fetches ComfyUI and the private plugin at each start, installs requirements, restores files and starts ComfyUI. |
-| Pod | `model_store.py` | Mirrors completed models, workflows, inputs and outputs between local disk and the global volume. |
+| Pod | `model_store.py` | Prepares saved model links and mirrors completed models, workflows, inputs and outputs to the global volume. |
+| Pod | `model_cache.py` | Copies a saved model locally when ComfyUI loads it and reports transfer progress to the connector. |
 | Pod | `park.py` | Flushes files and stops the Pod after the configured idle or runtime limit. |
 | Starter | `broker.py` | Accepts a connect request for the owner's workspace and returns its current SSH endpoint. |
 | Starter | `recovery.py` | Starts or recreates the workspace, tries GPU fallbacks, verifies the replacement and retires the old Pod. |
@@ -90,7 +91,11 @@ The base image and its startup script are pinned and checked. This remote deploy
 
 ## Storage
 
-Global storage persists after Pod deletion and can restore the important files on another Pod. The helper keeps a normal local filesystem for ComfyUI because a global object volume does not provide normal filesystem locking and rename semantics. Completed files are copied to checksum-addressed blobs and verified before publishing their manifest entries.
+Global storage persists after Pod deletion and can restore the important files on another Pod. Startup restores workflows, inputs and outputs, then exposes saved models through local file links to the mounted global volume. It checks their presence and size without reading every model, so the WebUI can start before model transfers. Existing local models are reused.
+
+The hosting extension copies a linked model to local disk when ComfyUI's standard model loader first requests it. It reports the filename, transferred bytes and verification state through the existing SSH connection; connector 1.0.3 or newer displays this progress while remaining connected. It also follows downloads started through the plugin's model-download API. The copy is checked against its saved checksum before atomically replacing the link. Failed transfers leave the saved model intact and can be retried by generating again. Custom loaders which bypass ComfyUI's standard loader can read the global link directly, without local-cache progress.
+
+New files and downloads remain on a normal local filesystem. Completed files are copied to checksum-addressed blobs and verified before publishing their manifest entries. Model links and unfinished transfers are excluded from synchronization. A global object volume does not provide normal filesystem locking and rename semantics.
 
 `models/`, `user/default/workflows/`, `input/` and `output/` are mirrored. Custom node installations, virtual environments and private SSH keys are not mirrored. File deletions are not propagated, and old blobs are retained. This is a single-writer store for this Pod, not a live shared filesystem for multiple Pods. Global storage still incurs storage charges while the Pod is stopped.
 
@@ -102,7 +107,7 @@ Use `python deploy/runpod/runpod.py stop` to flush global storage and stop the P
 
 A stopped Pod does not reserve its GPU. During connection, the starter first tries to start the existing Pod. If that host has no free GPU, or the Pod is missing, it allocates a replacement using the existing template and global volume. Each request tries at most one GPU tier. After all eligible tiers are exhausted, it waits a minute before trying again. The connector's startup timeout still applies.
 
-Replacement creates a new Pod ID and SSH address. The starter retains the stopped source until it verifies the replacement's ownership, GPU price, configuration, storage mounts and running backend. A dedicated SSH key can only execute the fixed health check; it cannot forward ports or open a shell. The check requires restored storage, ComfyUI and the plugin's HTTP transport. Successful recovery removes the source, leaving one Pod. Existing invitations continue to use the same starter and restored guest keys.
+Replacement creates a new Pod ID and SSH address. The starter retains the stopped source until it verifies the replacement's ownership, GPU price, configuration, storage mounts and running backend. A dedicated SSH key can only execute the fixed health check; it cannot forward ports or open a shell. The check requires prepared storage, the model-cache status endpoint, ComfyUI and the plugin's HTTP transport. Successful recovery removes the source, leaving one Pod. Existing invitations continue to use the same starter and restored guest keys.
 
 Use `python deploy/runpod/runpod.py replace` to queue recovery through the same starter. It reuses a healthy Pod, starts a stopped Pod when possible, and replaces it when capacity is unavailable. Owner commands resolve the current Pod by deployment identity.
 
