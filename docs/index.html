@@ -1,36 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-connector-page="2">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:18187; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Hosted ComfyUI</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="connect.js" defer></script>
+  <link rel="stylesheet" href="style.css?v=04d6004619cd5ebc9621809b3588a41cf76967c339b23ae56052619db980a5e4">
+  <script src="connect.js?v=4c60450323cabfd0d4bb3d97bedc65ec4c218a2711f2840856497f733906a062" defer></script>
 </head>
 <body>
   <main>
     <h1>Hosted ComfyUI</h1>
     <p>Connect to the workspace you were invited to. Its WebUI will open when ready.</p>
     <div class="actions">
-      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download and install</a>
-      <button id="connect" class="button secondary" type="button" disabled>Already installed? Connect</button>
+      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe?v=9d33780a885c5219d65b98d443811617399876f70f59ee45bf352a2a0341d17c" download rel="noreferrer">Download and install</a>
+      <button id="connect" class="button primary" type="button" hidden disabled>Connect</button>
     </div>
-    <p id="install-status" class="note">Install the Windows connector to open this workspace.</p>
-    <p id="status" class="note" role="status" aria-live="polite">Checking invitation…</p>
-    <details id="install-guide">
-      <summary id="install-help">Installation help</summary>
-      <h2>Install the Windows connector</h2>
-      <ol>
-        <li><a id="reinstall" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download or reinstall the connector</a>.</li>
-        <li>Open the downloaded file. Look in your browser's downloads menu, usually near the upper right, or your Downloads folder.</li>
-        <li>Finish installation. This tab will try to continue automatically; click Connect if your browser asks.</li>
-      </ol>
-      <p id="download-status" class="note">Windows may ask you to confirm opening a downloaded application.</p>
-      <p id="appinstaller-option" hidden><a id="appinstaller-download" href="downloads/HostedComfyUI.appinstaller" download rel="noreferrer">App Installer download</a> is also available. Open the downloaded file to install.</p>
-      <button id="installed" class="button secondary" type="button">I installed it</button>
-    </details>
+    <p id="status" class="note" role="status" aria-live="polite">Install the connector to continue. Allow local access if your browser asks.</p>
+    <ol id="install-guide" hidden>
+      <li>Open <strong>HostedComfyUIConnector.exe</strong> from your browser's downloads menu, usually near the upper right.</li>
+      <li>Confirm installation for your Windows account.</li>
+      <li>This page will switch to <strong>Connect</strong> automatically.</li>
+    </ol>
     <p class="footnote">The connector starts the server and keeps a private local connection open for your browser and Notch. Startup can take a few minutes.</p>
     <p class="footnote">Keep the connector open while working. Keep your invitation link private.</p>
     <noscript><p>Enable JavaScript to pass your invitation to the connector.</p></noscript>

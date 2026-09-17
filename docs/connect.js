@@ -19,127 +19,100 @@ function invitationToken(fragment) {
 }
 
 function initializePage() {
+  if (document.documentElement.dataset.connectorPage !== "2") {
+    const address = new URL(window.location.href);
+    if (address.searchParams.get("page") !== "2") {
+      address.searchParams.set("page", "2");
+      window.location.replace(address.href);
+    } else {
+      const status = document.getElementById("status");
+      if (status) status.textContent = "This page is out of date. Reload it to continue.";
+    }
+    return;
+  }
   const connect = document.getElementById("connect");
+  const download = document.getElementById("download");
   const status = document.getElementById("status");
+  const guide = document.getElementById("install-guide");
   let token;
-  let installRequest = "";
-  let channel;
-  let confirmed = false;
-  let confirmationSaved = false;
-  try { confirmed = confirmationSaved = localStorage.getItem("hosted-comfyui-install-confirmed") === "1"; } catch { }
-  const renderInstallState = () => {
-    document.getElementById("download").hidden = confirmed;
-    connect.className = confirmed ? "button primary" : "button secondary";
-    connect.textContent = confirmed ? "Connect" : "Already installed? Connect";
-    document.getElementById("install-help").textContent = confirmed ? "Help or reinstall" : "Installation help";
-    document.getElementById("install-status").textContent = confirmed
-      ? (confirmationSaved ? "Installation was confirmed in this browser." : "Installation confirmed for this visit.")
-      : "Install the Windows connector to open this workspace.";
-  };
-  const confirmInstallation = () => {
-    confirmed = true;
-    try {
-      localStorage.setItem("hosted-comfyui-install-confirmed", "1");
-      confirmationSaved = true;
-    } catch { }
-    renderInstallState();
-  };
-  renderInstallState();
   try {
     token = invitationToken(window.location.hash);
-    connect.disabled = false;
-    status.textContent = "Allow your browser to open the connector when prompted.";
-  } catch {
-    status.textContent = "Open the complete invitation link sent by your host. If it still fails, ask for a new link.";
-  }
-  const openConnector = (automatic = false) => {
-    if (!token) return;
-    status.textContent = automatic
-      ? "Opening the connector. If your browser blocks this, click Connect."
-      : "Check your browser's prompt. If nothing opens, use the installation help below.";
+  } catch { }
+  let ready = false;
+  let installing = false;
+  let opening = false;
+  let installerAvailable = true;
+  let timer;
+  let pending;
+  let stopped = false;
+  const render = () => {
+    download.hidden = ready;
+    connect.hidden = !ready;
+    connect.disabled = !token || !ready;
+    guide.hidden = ready || !installing;
+    status.textContent = !token
+      ? "Open the complete invitation link sent by your host."
+      : ready
+        ? (opening ? "Opening the connector. Allow your browser's prompt." : "Connector detected. You're ready to connect.")
+        : installerAvailable
+          ? "Install the connector to continue. Allow local access if your browser asks."
+          : "The connector download is being prepared. Please return shortly.";
+  };
+  render();
+  download.addEventListener("click", () => { installing = true; render(); });
+  connect.addEventListener("click", () => {
+    if (!token || !ready) return;
+    opening = true;
+    render();
     try { window.location.href = "hosted-comfyui://connect#" + token; }
-    catch { status.textContent = "Your browser needs another click. Click Connect to continue."; }
-  };
-  const cancelInstallRequest = () => {
-    try {
-      const pending = JSON.parse(localStorage.getItem("hosted-comfyui-install-request"));
-      if (pending && pending.id === installRequest) localStorage.removeItem("hosted-comfyui-install-request");
-    } catch { }
-    installRequest = "";
-  };
-  connect.addEventListener("click", () => { cancelInstallRequest(); openConnector(); });
-  const beginInstall = () => {
-    document.getElementById("install-guide").open = true;
-    if (!token) return;
-    installRequest = crypto.randomUUID();
-    try {
-      localStorage.setItem("hosted-comfyui-install-request", JSON.stringify({ id: installRequest, time: Date.now() }));
-    } catch { installRequest = ""; }
-  };
-  document.getElementById("download").addEventListener("click", beginInstall);
-  document.getElementById("reinstall").addEventListener("click", beginInstall);
-  document.getElementById("appinstaller-download").addEventListener("click", beginInstall);
-  const acknowledgeInstall = () => {
-    confirmInstallation();
-    if (!token) return;
-    document.getElementById("install-guide").open = false;
-    status.textContent = "Installation confirmed. Click Connect to open your workspace.";
-    connect.focus();
-  };
-  document.getElementById("installed").addEventListener("click", () => {
-    cancelInstallRequest();
-    acknowledgeInstall();
-    openConnector();
+    catch { status.textContent = "Click Connect again and allow your browser to open the connector."; }
   });
-  const receiveInstall = (message) => {
-    if (message && message.type === "installation-confirmed") { confirmInstallation(); return; }
-    if (!message || message.type !== "installed" || !installRequest || message.requestId !== installRequest) return;
+  const check = async () => {
+    if (pending || stopped) return;
+    clearTimeout(timer);
+    if (document.hidden) return;
+    const controller = new AbortController();
+    pending = controller;
+    const timeout = setTimeout(() => controller.abort(), 4500);
+    let available = false;
     try {
-      const pending = JSON.parse(localStorage.getItem("hosted-comfyui-install-request"));
-      if (!pending || pending.id !== installRequest || !Number.isFinite(pending.time) ||
-          Date.now() < pending.time || Date.now() - pending.time >= 3600000) return;
-    } catch { return; }
-    const requestId = installRequest;
-    installRequest = "";
-    acknowledgeInstall();
-    openConnector(true);
-    const response = { type: "continuing", requestId };
-    if (channel) channel.postMessage(response);
-    try {
-      localStorage.setItem("hosted-comfyui-install-response", JSON.stringify(response));
-      localStorage.removeItem("hosted-comfyui-install-response");
-      const pending = JSON.parse(localStorage.getItem("hosted-comfyui-install-request"));
-      if (pending && pending.id === requestId) localStorage.removeItem("hosted-comfyui-install-request");
+      const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
+      const response = await fetch("http://127.0.0.1:18187/status?nonce=" + nonce, {
+        mode: "cors", credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer",
+        redirect: "error", targetAddressSpace: "loopback", signal: controller.signal
+      });
+      if (response.ok) {
+        const value = await response.json();
+        available = value && value.app === "hosted-comfyui-connector" && value.protocol === 1 && value.nonce === nonce;
+      }
     } catch { }
+    finally {
+      clearTimeout(timeout);
+      pending = null;
+    }
+    if (stopped) return;
+    if (!available) opening = false;
+    ready = Boolean(available);
+    render();
+    if (!document.hidden) timer = setTimeout(check, 2000);
   };
-  if (typeof BroadcastChannel !== "undefined") {
-    try {
-      channel = new BroadcastChannel("hosted-comfyui-install");
-      channel.addEventListener("message", (event) => receiveInstall(event.data));
-    } catch { }
-  }
-  window.addEventListener("storage", (event) => {
-    if (event.key === "hosted-comfyui-install-confirmed" && event.newValue === "1") {
-      confirmed = confirmationSaved = true;
-      renderInstallState();
-    }
-    if (event.key === "hosted-comfyui-install-event" && event.newValue) {
-      try { receiveInstall(JSON.parse(event.newValue)); } catch { }
-    }
+  document.addEventListener("visibilitychange", check);
+  window.addEventListener("focus", check);
+  window.addEventListener("pagehide", () => {
+    stopped = true;
+    clearTimeout(timer);
+    if (pending) pending.abort();
   });
+  window.addEventListener("pageshow", () => { stopped = false; check(); });
+  check();
   fetch("downloads/release.json", { cache: "no-store", credentials: "omit", referrerPolicy: "no-referrer" })
     .then((response) => response.ok ? response.json() : null)
     .then((release) => {
-      if (release && release.appInstallerAvailable === true) {
-        document.getElementById("appinstaller-option").hidden = false;
-      }
       if (release && release.installerAvailable === false) {
-        for (const id of ["download", "reinstall"]) {
-          const download = document.getElementById(id);
-          download.removeAttribute("href");
-          download.setAttribute("aria-disabled", "true");
-        }
-        document.getElementById("download-status").textContent = "The connector download is being prepared. Please return shortly.";
+        installerAvailable = false;
+        download.removeAttribute("href");
+        download.setAttribute("aria-disabled", "true");
+        render();
       }
     })
     .catch(() => { });
