@@ -127,7 +127,7 @@ class OwnerTests(unittest.TestCase):
                 self.assertEqual(state, {"deployment_id": "setup", "pod_id": "old"})
 
     def test_default_owner_commands_follow_migrated_pod(self):
-        for command in ("status", "start", "stop", "connect", "sync", "terminate", "setup"):
+        for command in ("status", "start", "stop", "connect", "sync", "terminate"):
             with self.subTest(command=command), tempfile.TemporaryDirectory() as directory:
                 state_file = Path(directory, "state.json")
                 state_file.write_text(json.dumps({"deployment_id": "setup", "pod_id": "old"}))
@@ -142,7 +142,6 @@ class OwnerTests(unittest.TestCase):
                     patch.object(runpod, "pod_action") as action,
                     patch.object(runpod, "connect") as connect,
                     patch.object(runpod, "sync_storage") as sync,
-                    patch.object(runpod, "setup") as setup,
                     patch.object(sys, "stdout", new_callable=io.StringIO),
                 ):
                     runpod.main()
@@ -156,8 +155,22 @@ class OwnerTests(unittest.TestCase):
                 elif command == "terminate":
                     self.assertEqual(request.call_args.args, ("key", "DELETE", "/pods/new"))
                 else:
-                    called = {"connect": connect, "sync": sync, "setup": setup}[command]
+                    called = {"connect": connect, "sync": sync}[command]
                     self.assertEqual(called.call_args.args[0].pod, "new")
+
+    def test_setup_can_update_template_without_resolving_a_pod(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(sys, "argv", ["runpod.py", "setup", "--state-dir", directory]),
+                patch.object(runpod, "api_key", return_value="key"),
+                patch.object(runpod, "private_file"),
+                patch.object(runpod, "resolve_pod") as resolve,
+                patch.object(runpod, "setup") as setup,
+            ):
+                runpod.main()
+            resolve.assert_not_called()
+            setup.assert_called_once()
+            self.assertIsNone(setup.call_args.args[0].pod)
 
     def test_explicit_pod_command_never_rewrites_canonical_id(self):
         with tempfile.TemporaryDirectory() as directory:

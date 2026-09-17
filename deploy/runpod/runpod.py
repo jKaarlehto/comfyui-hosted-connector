@@ -81,7 +81,7 @@ def main():
         save_state(state_file, state)
         args.secret_name = args.secret_name or "notch_" + state["deployment_id"][:12] + "_git"
     key = api_key(args.env_file)
-    if not explicit_pod and args.command not in ("catalog", "replace"):
+    if not explicit_pod and args.command not in ("catalog", "replace", "setup"):
         args.pod = resolve_pod(key, state, state_file)
     if args.command == "setup":
         setup(args, key, state, state_file)
@@ -94,7 +94,7 @@ def main():
         )
     elif args.command == "replace":
         if not state.get("broker_id"):
-            raise RuntimeError("Run hosted.py setup before requesting Pod migration")
+            raise RuntimeError("Run hosted.py setup before requesting Pod recovery")
         import recovery
 
         print(json.dumps(recovery.replace_pod(key, state["broker_id"]), indent=2))
@@ -276,6 +276,9 @@ def setup(args, key, state, state_file):
     bootstrap = bootstrap.replace(
         '_PARK_SCRIPT = ""', "_PARK_SCRIPT = " + repr(Path(__file__).with_name("park.py").read_text(encoding="utf-8"))
     )
+    bootstrap = bootstrap.replace(
+        '_HEALTH_SCRIPT = ""', "_HEALTH_SCRIPT = " + repr(Path(__file__).with_name("health.py").read_text(encoding="utf-8"))
+    )
     template = {
         "name": args.name,
         "image": IMAGE,
@@ -303,6 +306,10 @@ def setup(args, key, state, state_file):
             "NOTCH_GLOBAL_STORE": "/workspace-global" if args.storage == "global" else "",
         },
     }
+    if state.get("template_id"):
+        current = request(key, "GET", "/templates/" + state["template_id"])
+        if "NOTCH_RECOVERY" in current.get("env", {}):
+            template["env"]["NOTCH_RECOVERY"] = current["env"]["NOTCH_RECOVERY"]
     (args.state_dir / "template.json").write_text(json.dumps(template, indent=2) + "\n", encoding="utf-8")
     if state.get("template_id"):
         result = request(key, "PATCH", "/templates/" + state["template_id"], template)

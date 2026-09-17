@@ -26,7 +26,8 @@ The link contains those two reusable tester keys. The connector handles authenti
 | Pod | `model_store.py` | Mirrors completed models, workflows, inputs and outputs between local disk and the global volume. |
 | Pod | `park.py` | Flushes files and stops the Pod after the configured idle or runtime limit. |
 | Starter | `broker.py` | Accepts a connect request for the owner's workspace and returns its current SSH endpoint. |
-| Starter / Owner | `recovery.py` | Starts the Pod or requests native migration when its GPU is unavailable, verifies the result and retires the old Pod. |
+| Starter | `recovery.py` | Starts or recreates the workspace, tries GPU fallbacks, verifies the replacement and retires the old Pod. |
+| Pod | `health.py` | Checks restored storage, ComfyUI and the plugin through a restricted SSH command. |
 | Publisher | `prepare_site.py` / `publish_site.py` | Stages and publishes an explicit allowlist of public page and connector files. |
 
 ## Owner setup
@@ -79,7 +80,7 @@ Pass settings to `runpod.py setup`; they are saved for subsequent commands. Re-r
 
 `hosted.py setup --starter-idle-seconds 60` controls how long the CPU starter stays warm between requests. The default is 60 seconds, so polling during GPU startup does not repeatedly cold-start it. Its worker minimum is zero.
 
-The starter manages one hosted workspace. If the stopped Pod's GPU is unavailable, it requests Runpod's native migration to the same GPU model and count. It does not scale the workspace or automatically upgrade its GPU.
+The starter manages one hosted workspace with global storage. It first tries the saved GPU, then L40S, RTX 6000 Ada, RTX A6000 and A40 across available regions, within a saved hourly price limit. Configure these with `hosted.py setup --gpu-fallbacks "NVIDIA L40S,NVIDIA A40" --max-hourly-cost 2.09`. The default limit is the configured GPU's current price at setup. Recovery replaces the workspace's Pod; it does not scale it.
 
 Opening the WebUI or leaving an SSH tunnel connected does not prevent idle parking. Long-running generations are stopped if the maximum runtime is reached. Storage is flushed before parking; a failed flush is retried before stopping.
 
@@ -99,13 +100,15 @@ Use `python deploy/runpod/runpod.py stop` to flush global storage and stop the P
 
 ## GPU recovery
 
-A stopped Pod does not reserve its GPU. During connection, the starter first tries to start the existing Pod. If that host has no free GPU, it requests [Runpod's native Pod migration](https://docs.runpod.io/pods/troubleshooting/pod-migration). When Runpod reports no available capacity, it retries at most once a minute while connection requests continue. The connector's startup timeout still applies.
+A stopped Pod does not reserve its GPU. During connection, the starter first tries to start the existing Pod. If that host has no free GPU, or the Pod is missing, it allocates a replacement using the existing template and global volume. Each request tries at most one GPU tier. After all eligible tiers are exhausted, it waits a minute before trying again. The connector's startup timeout still applies.
 
-Migration creates a new Pod ID and SSH address. The starter keeps the source Pod until Runpod reports completion and the target's ownership, GPU, configuration, storage mounts and SSH endpoint have been verified. It then retires the source, leaving one ComfyUI Pod. A changed configuration or higher target price stops recovery for owner review. Existing invitation links continue to use the same starter; testers do not need new credentials. Owner commands resolve the current Pod by deployment identity rather than trusting a saved Pod ID.
+Replacement creates a new Pod ID and SSH address. The starter retains the stopped source until it verifies the replacement's ownership, GPU price, configuration, storage mounts and running backend. A dedicated SSH key can only execute the fixed health check; it cannot forward ports or open a shell. The check requires restored storage, ComfyUI and the plugin's HTTP transport. Successful recovery removes the source, leaving one Pod. Existing invitations continue to use the same starter and restored guest keys.
 
-Use `python deploy/runpod/runpod.py replace` to request the same migration flow explicitly for a stopped Pod. It requires `hosted.py setup` to have configured the starter, which updates its current Pod automatically after successful recovery.
+Use `python deploy/runpod/runpod.py replace` to queue recovery through the same starter. It reuses a healthy Pod, starts a stopped Pod when possible, and replaces it when capacity is unavailable. Owner commands resolve the current Pod by deployment identity.
 
-The starter stores recovery progress and the migration ID in its endpoint environment as `NOTCH_RECOVERY`, so a CPU worker cold start can resume polling. If a migration request has an uncertain result and cannot be matched to an active migration, it does not submit another request blindly. The owner must inspect Runpod before retrying. Failed migrations retain the source Pod for that review.
+Recovery progress is stored in the private GPU template's `NOTCH_RECOVERY` environment entry. Updating progress does not redeploy the starter. After an uncertain allocation response, the starter checks for the recorded attempt for at least two minutes and three separated inventories before retrying. Delayed duplicate allocations are reconciled and retired. Retries after cold starts or interrupted cleanup resume from the saved state. Unexpected ownership, configuration or storage changes stop recovery for owner review.
+
+`hosted.py setup --no-restart` updates the template and starter without restarting the Pod. Use it only when the running Pod already has the matching health command and key; normally setup applies those through a restart.
 
 ## Tester connection
 

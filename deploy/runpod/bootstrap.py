@@ -16,6 +16,7 @@ START_SHA256 = "a265753f3bf3f54b38a7badabe1656da414a5d50fa9abb4efe2fd2542e309084
 GITHUB_HOST_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
 _MODEL_STORE_SCRIPT = ""
 _PARK_SCRIPT = ""
+_HEALTH_SCRIPT = ""
 COMFY_UPDATE_SCRIPT = """
 echo "[Notch Runpod] Updating ComfyUI"
 git -C "$COMFYUI_DIR" fetch --quiet --depth=1 https://github.com/Comfy-Org/ComfyUI.git "$NOTCH_COMFY_REF" || exit $?
@@ -89,6 +90,28 @@ def main():
     port = int(os.environ.get("NOTCH_COMFY_PORT", "8188"))
     if not 1 <= port <= 65535:
         raise ValueError("Invalid ComfyUI port")
+    health_key = os.environ.get("NOTCH_HEALTH_PUBLIC_KEY", "")
+    if health_key:
+        if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+", health_key):
+            raise ValueError("Invalid health public key")
+        Path("/opt/notch-health.py").write_text(_HEALTH_SCRIPT, encoding="utf-8")
+        Path("/opt/notch-health.json").write_text(
+            json.dumps(
+                {
+                    "deployment_id": os.environ["NOTCH_DEPLOYMENT_ID"],
+                    "pod_id": os.environ["RUNPOD_POD_ID"],
+                    "port": port,
+                    "store": store,
+                }
+            )
+        )
+        os.environ["PUBLIC_KEY"] = (
+            os.environ.get("PUBLIC_KEY", "")
+            + '\nrestrict,command="/usr/bin/python3 /opt/notch-health.py" '
+            + health_key
+            + " notch-health"
+        )
+    Path("/opt/notch-storage-restored").unlink(missing_ok=True)
     guests_path = Path(store, "notch/guests.json") if store else Path("/workspace/.notch-hosted/guests.json")
     if guests_path.is_file():
         guests = json.loads(guests_path.read_text())
@@ -123,7 +146,8 @@ python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt || exit $?
 export NOTCH_AUTO_INSTALL=0
 if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
-    python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode restore
+    python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode restore || exit $?
+    touch /opt/notch-storage-restored
     python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode watch &
 fi
 echo "[Notch Runpod] Plugin ready; starting ComfyUI"
@@ -147,7 +171,10 @@ def resolve_comfy_ref(revision):
         return revision
     request = urllib.request.Request(
         "https://api.github.com/repos/Comfy-Org/ComfyUI/releases/latest",
-        headers={"Accept": "application/vnd.github+json", "User-Agent": "Hosted-ComfyUI-Connector"},
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "Hosted-ComfyUI-Connector",
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -184,7 +211,10 @@ def checkout_plugin(checkout, repository, revision, git_env):
         check=True,
         timeout=180,
     )
-    subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", "--detach", "FETCH_HEAD"], check=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+        check=True,
+    )
     actual = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
     if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
         raise RuntimeError("Plugin revision verification failed")

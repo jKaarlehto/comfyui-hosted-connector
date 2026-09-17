@@ -1,22 +1,427 @@
-"""Recover one hosted workspace through Runpod's native Pod migration."""
+"""Reconcile one hosted workspace while retaining its global persistent storage."""
 
-import hashlib
+import base64
+import io
 import json
+import os
 import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime, timedelta, timezone
 
 LOCK = threading.Lock()
-MIGRATION_FIELDS = "id sourcePodId targetPodId status progress"
-CAPACITY_ERRORS = ("not enough free gpus", "no instances currently available", "no longer any instances available")
+DEADLINE = threading.local()
+CAPACITY_ERRORS = (
+    "not enough free gpus",
+    "no instances currently available",
+    "no longer any instances available",
+)
+FALLBACK_GPUS = [
+    "NVIDIA L40S",
+    "NVIDIA RTX 6000 Ada Generation",
+    "NVIDIA RTX A6000",
+    "NVIDIA A40",
+]
+
+
+def connection(key, endpoint_id):
+    with LOCK:
+        DEADLINE.value = time.monotonic() + 48
+        try:
+            return Recovery(key, endpoint_id).connect()
+        except UncertainRequest:
+            return starting("Runpod is taking longer to respond; checking again shortly")
+        finally:
+            del DEADLINE.value
+
+
+def replace_pod(key, endpoint_id):
+    job = request(
+        key,
+        "POST",
+        "/" + endpoint_id + "/run",
+        {"input": {"action": "connect"}},
+        "https://api.runpod.ai/v2",
+    )
+    return {
+        "state": "starting",
+        "message": "Recovery requested through the starter",
+        "job_id": job["id"],
+    }
+
+
+class Recovery:
+    def __init__(self, key, endpoint_id):
+        self.key = key
+        endpoint = request(key, "GET", "/serverless/" + endpoint_id)
+        if endpoint["workers"]["max"] != 1:
+            raise RuntimeError("Hosted recovery requires one starter worker")
+        self.env = endpoint["env"]
+        self.template_id = self.env["NOTCH_TEMPLATE_ID"]
+        self.template = request(key, "GET", "/templates/" + self.template_id)
+        if self.template["env"].get("NOTCH_DEPLOYMENT_ID") != self.env["NOTCH_DEPLOYMENT_ID"]:
+            raise RuntimeError("The configured template belongs to another workspace")
+        self.state = json.loads(self.template["env"].get("NOTCH_RECOVERY") or "{}")
+        self.refresh()
+
+    def refresh(self):
+        pods = request(self.key, "GET", "/pods")["pods"]
+        if not isinstance(pods, list) or any(not isinstance(pod, dict) or not pod.get("id") for pod in pods):
+            raise RuntimeError("Runpod returned an incomplete Pod inventory")
+        self.owned = {
+            pod["id"]: pod
+            for pod in pods
+            if pod.get("env", {}).get("NOTCH_DEPLOYMENT_ID") == self.env["NOTCH_DEPLOYMENT_ID"]
+        }
+
+    def save(self, state):
+        env = {
+            **self.template["env"],
+            "NOTCH_RECOVERY": json.dumps(state, separators=(",", ":")),
+        }
+        request(self.key, "PATCH", "/templates/" + self.template_id, {"env": env})
+        self.template["env"] = env
+        self.state = state
+
+    def connect(self):
+        phase = self.state.get("phase")
+        if phase == "failed":
+            return {"state": "unavailable", "message": self.state["message"]}
+        if phase in ("requesting", "verifying", "cleanup"):
+            return self.reconcile()
+        attempts = self.state.get("attempts", [])
+        if phase == "capacity" and any(
+            pod["id"] != self.state.get("source_id") and pod.get("name") in attempts for pod in self.owned.values()
+        ):
+            self.save({**self.state, "phase": "requesting"})
+            return self.reconcile()
+        if phase == "complete" and self.owned and set(self.owned) != {self.state["pod_id"]}:
+            self.save(
+                {
+                    **self.state,
+                    "phase": "verifying",
+                    "target_id": self.state["pod_id"],
+                    "source_id": None,
+                }
+            )
+            return self.reconcile()
+        if len(self.owned) > 1:
+            raise RuntimeError("Unexpected Pods in this workspace; owner review required")
+        pod = next(iter(self.owned.values()), None)
+        if pod and pod["status"] != "EXITED":
+            return self.ready(pod["id"])
+        if self.state.get("retry_after", 0) > time.time():
+            return starting("Waiting for GPU capacity; retrying once a minute")
+        if pod and phase != "capacity":
+            try:
+                self.action(pod["id"], "start")
+                return starting("Starting hosted ComfyUI")
+            except CapacityUnavailable:
+                pass
+        return self.allocate(pod)
+
+    def allocate(self, source):
+        if source and (source["status"] != "EXITED" or self.mounts(source) != self.expected_mounts()):
+            raise RuntimeError("Replacement requires a stopped Pod using the configured global storage")
+        tiers = json.loads(self.env["NOTCH_GPU_TIERS"])
+        prices = graphql(self.key, "query { gpuTypes { id securePrice } }")["gpuTypes"]
+        prices = {item["id"]: item.get("securePrice") for item in prices}
+        index = int(self.state.get("gpu_index", 0))
+        while index < len(tiers):
+            price = prices.get(tiers[index])
+            if price is not None and 0 < float(price) <= float(self.env["NOTCH_MAX_COST"]):
+                break
+            index += 1
+        if index >= len(tiers):
+            self.save(
+                {
+                    **self.state,
+                    "phase": "capacity",
+                    "gpu_index": 0,
+                    "retry_after": time.time() + 60,
+                }
+            )
+            return starting("Waiting for GPU capacity within the configured price limit")
+        state = {
+            "phase": "requesting",
+            "source_id": source["id"] if source else None,
+            "attempts": self.state.get("attempts", []) + [self.template["name"] + "-" + uuid.uuid4().hex],
+            "gpu_id": tiers[index],
+            "gpu_index": index,
+            "requested_at": time.time(),
+            "checks": 0,
+            "last_check": 0,
+        }
+        self.save(state)
+        current = request(self.key, "GET", "/templates/" + self.template_id)
+        if json.loads(current["env"].get("NOTCH_RECOVERY") or "{}") != state:
+            return starting("Another recovery request is being reconciled")
+        specification = {
+            "name": state["attempts"][-1],
+            "templateId": self.template_id,
+            "cloudType": "SECURE",
+            "gpuTypeId": state["gpu_id"],
+            "gpuCount": 1,
+            "containerDiskInGb": self.template["disk"],
+            "volumeInGb": 0,
+            "startSsh": True,
+            "supportPublicIp": True,
+            "allowedCudaVersions": ["12.8", "13.0", "13.2"],
+            "volumeMounts": self.expected_mounts()["global"],
+        }
+        minutes = int(self.template["env"].get("NOTCH_MAX_MINUTES", "240"))
+        if minutes > 0:
+            specification["stopAfter"] = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        try:
+            target = graphql(
+                self.key,
+                "mutation ($input: PodFindAndDeployOnDemandInput!) { podFindAndDeployOnDemand(input: $input) { id } }",
+                {"input": specification},
+            )["podFindAndDeployOnDemand"]
+        except CapacityUnavailable:
+            self.save({**state, "phase": "capacity", "gpu_index": index + 1})
+            return starting("That GPU is unavailable; checking the next configured GPU")
+        except RejectedRequest:
+            message = "Runpod rejected the replacement configuration; the owner must check the starter settings"
+            self.save({**state, "phase": "failed", "message": message})
+            return {"state": "unavailable", "message": message}
+        except UncertainRequest:
+            return starting("Checking whether Runpod accepted the replacement")
+        if not isinstance(target, dict) or not target.get("id"):
+            return starting("Checking whether Runpod accepted the replacement")
+        self.save({**state, "phase": "verifying", "target_id": target["id"]})
+        return starting("Preparing a replacement GPU and restoring persistent files")
+
+    def reconcile(self):
+        source_id = self.state.get("source_id")
+        names = self.state.get("attempts", [])
+        candidates = [pod for pod in self.owned.values() if pod["id"] != source_id and pod.get("name") in names]
+        known = {pod["id"] for pod in candidates} | {
+            source_id,
+            self.state.get("target_id"),
+        }
+        if set(self.owned) - known:
+            raise RuntimeError("Unexpected Pods during recovery; owner review required")
+        target_id = self.state.get("target_id")
+        target = self.owned.get(target_id) if target_id else None
+        if target and target not in candidates:
+            raise RuntimeError("The replacement does not match the recorded allocation")
+        if not target and candidates:
+            target = min(candidates, key=lambda pod: (names.index(pod["name"]), pod["id"]))
+            self.save({**self.state, "phase": "verifying", "target_id": target["id"]})
+        if not target:
+            now = time.time()
+            if now - self.state.get("last_check", 0) >= 20:
+                self.save(
+                    {
+                        **self.state,
+                        "checks": self.state.get("checks", 0) + 1,
+                        "last_check": now,
+                    }
+                )
+            if now - self.state["requested_at"] >= 120 and self.state.get("checks", 0) >= 3:
+                self.save(
+                    {
+                        **self.state,
+                        "phase": "capacity",
+                        "gpu_index": self.state["gpu_index"] + 1,
+                    }
+                )
+            return starting("Reconciling the replacement with Runpod before retrying")
+        for candidate in candidates:
+            if candidate["id"] != target["id"]:
+                if not self.valid_target(candidate):
+                    raise RuntimeError("Duplicate allocation configuration differs; owner review required")
+                if candidate["status"] != "EXITED":
+                    self.action(candidate["id"], "stop")
+                    return starting("Stopping a duplicate recovery allocation")
+                request(
+                    self.key,
+                    "DELETE",
+                    "/pods/" + candidate["id"],
+                    base="https://rest.runpod.io/v1",
+                )
+                return starting("Retiring a duplicate recovery allocation")
+        if not self.valid_target(target):
+            if target["status"] != "EXITED":
+                self.action(target["id"], "stop")
+            message = "The replacement configuration or price differs; it is stopped for owner review"
+            self.save({**self.state, "phase": "failed", "message": message})
+            return {"state": "unavailable", "message": message}
+        if target["status"] == "EXITED":
+            try:
+                self.action(target["id"], "start")
+                return starting("Starting the replacement GPU")
+            except CapacityUnavailable:
+                request(
+                    self.key,
+                    "DELETE",
+                    "/pods/" + target["id"],
+                    base="https://rest.runpod.io/v1",
+                )
+                self.save(
+                    {
+                        **self.state,
+                        "phase": "capacity",
+                        "gpu_index": self.state["gpu_index"] + 1,
+                    }
+                )
+                return starting("The replacement GPU became unavailable; trying another")
+        ready = self.ready(target["id"])
+        if ready["state"] != "ready":
+            return ready
+        source = self.owned.get(source_id)
+        if source:
+            if source["status"] != "EXITED":
+                self.action(source_id, "stop")
+                return starting("Stopping the original Pod before completing recovery")
+            if self.mounts(source) != self.expected_mounts():
+                raise RuntimeError("Original Pod storage changed; refusing to delete it")
+            self.save({**self.state, "phase": "cleanup"})
+            request(
+                self.key,
+                "DELETE",
+                "/pods/" + source_id,
+                base="https://rest.runpod.io/v1",
+            )
+        self.save({"phase": "complete", "pod_id": target["id"], "attempts": names})
+        return ready
+
+    def valid_target(self, target):
+        wanted = self.template
+        return (
+            target["cloud"] == "SECURE"
+            and target["gpu"]["count"] == 1
+            and target["gpu"]["id"] in json.loads(self.env["NOTCH_GPU_TIERS"])
+            and 0 < float(target["cost"]) <= float(self.env["NOTCH_MAX_COST"])
+            and all(target.get(name) == wanted.get(name) for name in ("image", "args", "disk"))
+            and sorted(target.get("ports") or []) == sorted(wanted.get("ports") or [])
+            and all(
+                target.get("env", {}).get(name) == value
+                for name, value in wanted["env"].items()
+                if name != "NOTCH_RECOVERY"
+            )
+            and self.mounts(target) == self.expected_mounts()
+        )
+
+    def expected_mounts(self):
+        if not self.env.get("NOTCH_VOLUME_ID"):
+            raise RuntimeError("Automatic replacement requires global persistent storage")
+        return {
+            "local_network": {},
+            "global": [
+                {
+                    "volumeId": self.env["NOTCH_VOLUME_ID"],
+                    "volumeType": "OBJECT_STORE_VOLUME",
+                    "mountPath": "/workspace-global",
+                }
+            ],
+        }
+
+    def mounts(self, pod):
+        storage = graphql(
+            self.key,
+            "query ($input: PodFilter!) { pod(input: $input) { volumeMounts { volumeId volumeType mountPath } } }",
+            {"input": {"podId": pod["id"]}},
+        )["pod"]
+        if storage is None:
+            raise RuntimeError("The Pod storage could not be verified")
+        return {
+            "local_network": pod.get("mounts") or {},
+            "global": sorted(
+                storage["volumeMounts"] or [],
+                key=lambda item: (item["mountPath"], item["volumeId"]),
+            ),
+        }
+
+    def action(self, pod_id, action):
+        return request(
+            self.key,
+            "POST",
+            "/pods/" + pod_id + "/" + action,
+            {},
+            "https://rest.runpod.io/v1",
+        )
+
+    def ready(self, pod_id):
+        pod = request(self.key, "GET", "/pods/" + pod_id, base="https://rest.runpod.io/v1")
+        host, port = pod.get("publicIp"), (pod.get("portMappings") or {}).get("22")
+        if pod["desiredStatus"] != "RUNNING" or not host or not port:
+            return starting("Waiting for SSH")
+        if getattr(DEADLINE, "value", float("inf")) - time.monotonic() < 20:
+            return starting("Checking ComfyUI readiness on the next connection request")
+        if not healthy(self.env, pod_id, host, int(port)):
+            return starting("Waiting for ComfyUI and persistent files")
+        return {
+            "state": "ready",
+            "host": host,
+            "ssh_port": int(port),
+            "comfy_port": int(self.env["NOTCH_COMFY_PORT"]),
+            "host_key": self.env["NOTCH_SSH_HOST_KEY"],
+        }
+
+
+def healthy(env, pod_id, host, port):
+    import paramiko
+
+    client = paramiko.SSHClient()
+    try:
+        public = env["NOTCH_SSH_HOST_KEY"].split()
+        client.get_host_keys().add(
+            f"[{host}]:{port}" if port != 22 else host,
+            public[0],
+            paramiko.Ed25519Key(data=base64.b64decode(public[1])),
+        )
+        private = base64.b64decode(os.environ["NOTCH_HEALTH_KEY_B64"]).decode()
+        identity = paramiko.Ed25519Key.from_private_key(io.StringIO(private))
+        client.connect(
+            host,
+            port=port,
+            username="root",
+            pkey=identity,
+            timeout=5,
+            auth_timeout=5,
+            banner_timeout=5,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        _, output, _ = client.exec_command("health", timeout=8)
+        result = json.loads(output.read(16385))
+        return result == {
+            "ready": True,
+            "pod_id": pod_id,
+            "deployment_id": env["NOTCH_DEPLOYMENT_ID"],
+        }
+    except (OSError, ValueError, KeyError, paramiko.SSHException):
+        return False
+    finally:
+        client.close()
+
+
+def starting(message):
+    return {"state": "starting", "message": message}
 
 
 class CapacityUnavailable(RuntimeError):
     pass
 
 
+class RejectedRequest(RuntimeError):
+    pass
+
+
+class UncertainRequest(RuntimeError):
+    pass
+
+
 def request(key, method, path, body=None, base="https://api.runpod.io/v2"):
+    remaining = getattr(DEADLINE, "value", float("inf")) - time.monotonic()
+    if remaining < 2:
+        raise UncertainRequest("Continuing recovery on the next connection request")
     req = urllib.request.Request(
         base + path,
         data=None if body is None else json.dumps(body).encode(),
@@ -28,246 +433,41 @@ def request(key, method, path, body=None, base="https://api.runpod.io/v2"):
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with urllib.request.urlopen(req, timeout=min(8, remaining)) as response:
             raw = response.read()
             return json.loads(raw) if raw else None
     except urllib.error.HTTPError as error:
         detail = error.read(16384).decode("utf-8", errors="replace")
         if any(text in detail.lower() for text in CAPACITY_ERRORS):
             raise CapacityUnavailable() from None
-        raise RuntimeError(f"Runpod request failed (HTTP {error.code}); retry shortly") from None
-    except (urllib.error.URLError, TimeoutError):
-        raise RuntimeError("Runpod request timed out; retry shortly") from None
+        if 400 <= error.code < 500 and error.code not in (408, 429):
+            raise RejectedRequest(f"Runpod rejected the request (HTTP {error.code})") from None
+        raise UncertainRequest("Runpod could not confirm the request") from None
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        raise UncertainRequest("Runpod could not confirm the request") from None
 
 
 def graphql(key, query, variables=None):
-    result = request(key, "POST", "/graphql", {"query": query, "variables": variables or {}}, "https://api.runpod.io")
+    result = request(
+        key,
+        "POST",
+        "/graphql",
+        {"query": query, "variables": variables or {}},
+        "https://api.runpod.io",
+    )
     if result.get("errors"):
         messages = " ".join(str(error.get("message", "")) for error in result["errors"])
         if any(text in messages.lower() for text in CAPACITY_ERRORS):
             raise CapacityUnavailable() from None
-        raise RuntimeError("Runpod could not complete recovery; the owner should check the Pod migration")
+        if result.get("data") and any(result["data"].values()):
+            raise UncertainRequest("Runpod returned an incomplete result")
+        codes = {error.get("extensions", {}).get("code") for error in result["errors"]}
+        if codes and codes <= {
+            "GRAPHQL_VALIDATION_FAILED",
+            "BAD_USER_INPUT",
+            "UNAUTHENTICATED",
+            "FORBIDDEN",
+        }:
+            raise RejectedRequest("Runpod rejected the operation")
+        raise UncertainRequest("Runpod could not confirm the operation")
     return result["data"]
-
-
-def connection(key, endpoint_id):
-    with LOCK:
-        return Recovery(key, endpoint_id).connect()
-
-
-def replace_pod(key, endpoint_id):
-    with LOCK:
-        return Recovery(key, endpoint_id).connect(replace=True)
-
-
-class Recovery:
-    def __init__(self, key, endpoint_id):
-        self.key = key
-        self.endpoint_id = endpoint_id
-        endpoint = request(key, "GET", "/serverless/" + endpoint_id)
-        if endpoint["workers"]["max"] != 1:
-            raise RuntimeError("Hosted recovery requires one starter worker")
-        self.env = endpoint["env"]
-        self.state = json.loads(self.env.get("NOTCH_RECOVERY") or "{}")
-        self.pods = request(key, "GET", "/pods")["pods"]
-        self.owned = {
-            pod["id"]: pod
-            for pod in self.pods
-            if pod.get("env", {}).get("NOTCH_DEPLOYMENT_ID") == self.env["NOTCH_DEPLOYMENT_ID"]
-        }
-
-    def save(self, state, pod_id=None):
-        self.env["NOTCH_RECOVERY"] = json.dumps(state, separators=(",", ":"))
-        if pod_id:
-            self.env["NOTCH_POD_ID"] = pod_id
-        request(self.key, "PATCH", "/serverless/" + self.endpoint_id, {"env": self.env})
-        self.state = state
-
-    def connect(self, replace=False):
-        if self.state.get("phase") == "failed":
-            return {"state": "unavailable", "message": self.state["message"]}
-        if self.state.get("phase") == "cleanup":
-            return self.finish()
-        if self.state.get("migration_id") or self.state.get("phase") == "requesting":
-            return self.poll()
-        if len(self.owned) != 1:
-            raise RuntimeError("Expected one hosted Pod; the owner must inspect this workspace")
-        pod = next(iter(self.owned.values()))
-        if self.env["NOTCH_POD_ID"] != pod["id"]:
-            self.save({}, pod["id"])
-        if pod["status"] == "EXITED":
-            if self.state.get("retry_after", 0) > time.time():
-                return self.waiting_capacity()
-            if not replace:
-                try:
-                    self.action(pod["id"], "start")
-                    if self.state:
-                        self.save({})
-                    return self.starting("Starting hosted ComfyUI")
-                except CapacityUnavailable:
-                    pass
-            return self.begin(pod)
-        if replace:
-            raise RuntimeError("Stop the Pod before requesting replacement")
-        return self.ready(pod["id"])
-
-    def begin(self, pod):
-        gpu = pod["gpu"]
-        prices = graphql(self.key, "query { gpuTypes { id securePrice } }")["gpuTypes"]
-        price = next((item["securePrice"] for item in prices if item["id"] == gpu["id"]), None)
-        if pod["cloud"] != "SECURE" or price is None or price * gpu["count"] > float(pod["cost"]) + 0.000001:
-            return {"state": "unavailable", "message": "Recovery needs owner review: the GPU price has changed"}
-        state = {
-            "phase": "requesting",
-            "source_id": pod["id"],
-            "gpu_id": gpu["id"],
-            "gpu_count": gpu["count"],
-            "max_cost": pod["cost"],
-            "configuration": self.configuration(pod),
-            "mounts": self.mounts(pod),
-        }
-        self.save(state)
-        try:
-            migration = graphql(
-                self.key,
-                "mutation ($input: MigratePodInput!) { migratePod(input: $input) { " + MIGRATION_FIELDS + " } }",
-                {"input": {"podId": pod["id"]}},
-            )["migratePod"]
-        except CapacityUnavailable:
-            self.save({"phase": "capacity", "retry_after": time.time() + 60})
-            return self.waiting_capacity()
-        self.record(migration)
-        return self.starting("Moving hosted ComfyUI to an available GPU")
-
-    def record(self, migration):
-        if migration["sourcePodId"] != self.state["source_id"]:
-            raise RuntimeError("Runpod returned a different migration source; owner review required")
-        self.save({**self.state, "phase": "migrating", "migration_id": migration["id"]})
-
-    def poll(self):
-        if not self.state.get("migration_id"):
-            migrations = graphql(self.key, "query { myself { activeMigrations { " + MIGRATION_FIELDS + " } } }")[
-                "myself"
-            ]["activeMigrations"]
-            matches = [item for item in migrations if item["sourcePodId"] == self.state["source_id"]]
-            if len(matches) != 1:
-                return {
-                    "state": "unavailable",
-                    "message": "Recovery could not be confirmed. The owner must check Runpod before retrying migration.",
-                }
-            self.record(matches[0])
-        migration = graphql(
-            self.key,
-            "query ($id: String!) { podMigrationById(migrationId: $id) { " + MIGRATION_FIELDS + " } }",
-            {"id": self.state["migration_id"]},
-        )["podMigrationById"]
-        if (
-            not migration
-            or migration["id"] != self.state["migration_id"]
-            or migration["sourcePodId"] != self.state["source_id"]
-        ):
-            raise RuntimeError("Runpod migration could not be verified; owner review required")
-        if migration["status"] in ("FAILED", "CANCELLED"):
-            message = "Runpod migration did not complete. The original Pod is retained; ask the owner to inspect it."
-            self.save({**self.state, "phase": "failed", "message": message})
-            return {"state": "unavailable", "message": message}
-        if migration["status"] != "COMPLETED":
-            return self.starting(
-                "Migrating hosted ComfyUI (Runpod progress: " + str(migration.get("progress") or 0) + ")"
-            )
-        self.save({**self.state, "phase": "cleanup", "target_id": migration["targetPodId"]})
-        return self.finish()
-
-    def finish(self):
-        source_id, target_id = self.state["source_id"], self.state["target_id"]
-        if not target_id or target_id == source_id or set(self.owned) - {source_id, target_id}:
-            raise RuntimeError("Unexpected Pods in recovery; owner review required")
-        target = self.owned.get(target_id)
-        if not target:
-            if any(pod["id"] == target_id for pod in self.pods):
-                raise RuntimeError("The migration target belongs to another workspace; owner review required")
-            return self.starting("Waiting for the migrated Pod")
-        gpu = target["gpu"]
-        if (
-            target["cloud"] != "SECURE"
-            or gpu["id"] != self.state["gpu_id"]
-            or gpu["count"] != self.state["gpu_count"]
-            or float(target["cost"]) > float(self.state["max_cost"]) + 0.000001
-            or self.configuration(target) != self.state["configuration"]
-            or self.mounts(target) != self.state["mounts"]
-        ):
-            if target["status"] == "RUNNING":
-                self.action(target_id, "stop")
-            message = (
-                "The replacement differs from the original configuration. It is stopped; owner review is required."
-            )
-            self.save({**self.state, "phase": "failed", "message": message})
-            return {"state": "unavailable", "message": message}
-        if target["status"] != "RUNNING":
-            if target["status"] == "EXITED":
-                self.action(target_id, "start")
-            return self.starting("Starting the migrated Pod")
-        ready = self.ready(target_id)
-        if ready["state"] != "ready":
-            return ready
-        source = self.owned.get(source_id)
-        if source:
-            if source.get("locked"):
-                graphql(
-                    self.key,
-                    "mutation ($input: PodLockInput!) { podUnlock(input: $input) { id } }",
-                    {"input": {"podId": source_id}},
-                )
-            if source["status"] != "EXITED":
-                self.action(source_id, "stop")
-                return self.starting("Finishing migration and retiring the old Pod")
-            request(self.key, "DELETE", "/pods/" + source_id, base="https://rest.runpod.io/v1")
-        self.save({}, target_id)
-        return ready
-
-    def mounts(self, pod):
-        storage = graphql(
-            self.key,
-            "query ($input: PodFilter!) { pod(input: $input) { volumeMounts { volumeId volumeType mountPath } } }",
-            {"input": {"podId": pod["id"]}},
-        )["pod"]
-        if storage is None:
-            raise RuntimeError("The Pod storage could not be verified; owner review required")
-        return {
-            "local_network": pod.get("mounts") or {},
-            "global": sorted(storage["volumeMounts"] or [], key=lambda item: (item["mountPath"], item["volumeId"])),
-        }
-
-    @staticmethod
-    def configuration(pod):
-        values = {name: pod.get(name) for name in ("image", "args", "disk", "registry", "globalNetworking")}
-        values["ports"] = sorted(pod.get("ports") or [])
-        values["env"] = {
-            name: value
-            for name, value in pod.get("env", {}).items()
-            if name.startswith("NOTCH_") or name == "PUBLIC_KEY"
-        }
-        return hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-    def action(self, pod_id, action):
-        return request(self.key, "POST", "/pods/" + pod_id + "/" + action, {}, "https://rest.runpod.io/v1")
-
-    def ready(self, pod_id):
-        pod = request(self.key, "GET", "/pods/" + pod_id, base="https://rest.runpod.io/v1")
-        host, port = pod.get("publicIp"), (pod.get("portMappings") or {}).get("22")
-        if pod["desiredStatus"] != "RUNNING" or not host or not port:
-            return self.starting("Waiting for SSH")
-        return {
-            "state": "ready",
-            "host": host,
-            "ssh_port": int(port),
-            "comfy_port": int(self.env["NOTCH_COMFY_PORT"]),
-            "host_key": self.env["NOTCH_SSH_HOST_KEY"],
-        }
-
-    @staticmethod
-    def starting(message):
-        return {"state": "starting", "message": message}
-
-    def waiting_capacity(self):
-        return self.starting("Waiting for an available GPU; retrying once a minute")
