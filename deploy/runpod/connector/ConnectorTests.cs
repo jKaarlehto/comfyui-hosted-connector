@@ -58,6 +58,29 @@ internal static class ConnectorTests
             Reject(delegate { Invitation.Normalize(Encode(fields)); });
             Check(Storage.Quote(@"C:\User Data\test.ps1") == "\"C:\\User Data\\test.ps1\"");
             Reject(delegate { Storage.Quote("bad\"path"); });
+            string marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "installed-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                int callbacks = 0;
+                Action openPage = delegate { callbacks++; };
+                Installer.AcknowledgeInstall(marker, false, openPage);
+                Check(callbacks == 1 && File.Exists(marker));
+                Installer.AcknowledgeInstall(marker, false, openPage);
+                Check(callbacks == 1);
+                Installer.AcknowledgeInstall(marker, true, openPage);
+                Check(callbacks == 2);
+                Installer.AcknowledgeInstall(marker, true, openPage);
+                Check(callbacks == 3);
+                Installer.AcknowledgeInstall(marker, false, openPage);
+                Check(callbacks == 3);
+                File.Delete(marker);
+                try { Installer.AcknowledgeInstall(marker, false, delegate { throw new IOException("Browser unavailable"); }); }
+                catch (IOException) { }
+                Check(!File.Exists(marker));
+                Installer.AcknowledgeInstall(marker, false, openPage);
+                Check(callbacks == 4 && File.Exists(marker));
+            }
+            finally { if (File.Exists(marker)) File.Delete(marker); }
             using (var rejectedInstall = Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HostedComfyUIConnector.exe"), "--install unexpected")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true }))
             {

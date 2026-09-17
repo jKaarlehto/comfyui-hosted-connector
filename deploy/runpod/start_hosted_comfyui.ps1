@@ -78,7 +78,9 @@ function Invoke-Starter($Access, [DateTime]$Deadline) {
 
 try {
     Write-State '1/5 Checking Windows SSH client'
-    $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
+    $sshCommand = Get-Command ssh.exe -ErrorAction SilentlyContinue
+    if (!$sshCommand) { throw 'Windows OpenSSH Client is missing. Install it under Settings > Optional features, then reconnect.' }
+    $ssh = $sshCommand.Source
     if ($LocalPort -lt 1024 -or $LocalPort -gt 65535) { throw 'Choose a local port between 1024 and 65535.' }
     if ($StartupTimeoutMinutes -lt 1 -or $StartupTimeoutMinutes -gt 60) { throw 'Choose a startup timeout between 1 and 60 minutes.' }
     if ([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners().Port -contains $LocalPort) {
@@ -227,8 +229,6 @@ try {
     Write-State 'Connection closed'
 } catch {
     Write-Host "Connection failed: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host 'If Windows OpenSSH Client is missing, install it under Settings > Optional features.'
-    Write-Host "To replace an invitation, remove HOSTED_COMFYUI_ACCESS from $EnvFile."
     exit 1
 } finally {
     if ($tunnel -and !$tunnel.HasExited) { $tunnel.Kill(); $tunnel.WaitForExit() }

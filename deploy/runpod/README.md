@@ -78,6 +78,8 @@ Pass settings to `runpod.py setup`; they are saved for subsequent commands. Re-r
 
 `hosted.py setup --starter-idle-seconds 60` controls how long the CPU starter stays warm between requests. The default is 60 seconds, so polling during GPU startup does not repeatedly cold-start it. Its worker minimum is zero.
 
+The starter only wakes the single configured GPU Pod. It does not scale ComfyUI, create Pods or replace an unavailable Pod automatically.
+
 Opening the WebUI or leaving an SSH tunnel connected does not prevent idle parking. Long-running generations are stopped if the maximum runtime is reached. Storage is flushed before parking; a failed flush is retried before stopping.
 
 The base image and its startup script are pinned and checked. This remote deployment uses HTTP transport and skips the plugin's `cuda-python` metapackage when installing its dependencies, preserving the base image's PyTorch-compatible CUDA bindings. The plugin's source requirements are left unchanged and its redundant startup installer is disabled in the deployment. Updates retain the image's pinned PyTorch/CUDA requirements. An incompatible upstream dependency update fails startup instead of silently replacing that stack. Startup logs show the actual ComfyUI and plugin commits.
@@ -96,9 +98,11 @@ A stopped Pod does not reserve its GPU. If Runpod cannot start it because that h
 
 ## Tester connection
 
-Open the private invitation link and click **Connect**. If the connector is not installed, expand **First time, or nothing opened?**, download and open the installer. Browser download controls are usually near the upper right; the file is also in Downloads. After installation, the invitation tab that started the latest download tries once to open the connector automatically. Browsers may require another click or their usual external-application prompt, so **Connect** remains available. If the invitation is in another browser/profile, return to it and click **Connect**. Browsers cannot reliably inspect registered URI handlers, so the page never polls the protocol or silently downloads an installer.
+On the first visit in a browser, the invitation page shows **Download and install** prominently, with **Already installed? Connect** beside it. Open the downloaded installer from the browser's downloads menu, usually near the upper right, or from Downloads. After installation, the invitation tab that started the latest download tries once to open the connector automatically. Browsers may require another click or their usual external-application prompt, so **Connect** remains available.
 
-The page keeps invitation data in the URL fragment; it does not send it to the hosting server or store it in browser storage. Installation notifications carry only a random request ID; a short-lived ID and timestamp identify the requesting tab without storing its invitation. The completion page reports whether that tab acknowledged the handoff, not whether the server connected. The connector performs the actual connection checks and opens the local WebUI when ready. Keep invitation links private, including browser history and copied messages.
+The installer callback records a nonsecret installation confirmation in that browser profile, even if the original invitation tab was closed. Later visits show **Connect** first and keep **Help or reinstall** available. **I installed it** also records your confirmation and tries Connect immediately. This is remembered confirmation, not detection of the Windows URI handler: a different browser, cleared storage or uninstalling the connector can make it stale. Browsers cannot reliably inspect registered URI handlers, so the page never polls the protocol or silently downloads an installer. If browser storage is unavailable, confirmation applies only to the current visit.
+
+The page keeps invitation data in the URL fragment; it does not send it to the hosting server or store it in browser storage. Stored installation data is only a confirmation flag plus a short-lived random request ID and timestamp identifying the requesting tab. Installation notifications carry no invitation or destination URL. The completion page reports whether that tab acknowledged the handoff, not whether the server connected. The connector performs the actual connection checks and opens the local WebUI when ready. Keep invitation links private, including browser history and copied messages.
 
 The script-only alternative remains available:
 

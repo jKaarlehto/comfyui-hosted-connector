@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$SiteUrl = '',
-    [string]$Version = '1.0.0.0',
+    [string]$Version = '1.0.1.0',
     [string]$CertificateThumbprint = '',
     [string]$Publisher = 'CN=ComfyUI-Notch',
     [switch]$Package,

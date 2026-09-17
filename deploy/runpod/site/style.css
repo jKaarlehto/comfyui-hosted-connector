@@ -6,7 +6,8 @@ h1 { font-size: 1.85rem; font-weight: 600; letter-spacing: -.03em; line-height: 
 h2 { font-size: 1rem; font-weight: 600; margin: 18px 0 10px; }
 p { margin: 14px 0 22px; }
 a { color: #284ba1; text-underline-offset: 3px; }
-.button { display: inline-block; padding: 9px 22px; border-radius: 5px; font: inherit; font-weight: 550; cursor: pointer; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.button { display: inline-block; padding: 9px 22px; border-radius: 5px; font: inherit; font-weight: 550; cursor: pointer; text-decoration: none; }
 .primary { border: 1px solid #303d56; background: #303d56; color: white; }
 .secondary { border: 1px solid #a9adb4; color: #35393f; background: transparent; }
 .button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid #466dc1; outline-offset: 4px; }
