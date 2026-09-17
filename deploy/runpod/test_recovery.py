@@ -44,6 +44,7 @@ class Provider:
         self.create_error = None
         self.commit_before_error = False
         self.delete_error = False
+        self.update_error = False
         self.backend_ready = True
         self.workers = 1
         self.pagination = {"hasNextPage": False, "nextCursor": None}
@@ -92,6 +93,11 @@ class Provider:
                     raise recovery.UncertainRequest()
                 return None
             pod = self.pods[pod_id]
+            if method == "PATCH":
+                pod["args"] = self.template["args"]
+                if self.update_error:
+                    raise recovery.UncertainRequest()
+                return {}
             if method == "GET":
                 return {
                     "desiredStatus": pod["status"],
@@ -143,6 +149,42 @@ class Provider:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_stopped_pod_adopts_updated_startup_before_resuming(self):
+        p = Provider()
+        p.start_error = None
+        p.template["args"] = "updated startup"
+        self.assertEqual(p.connect()["state"], "starting")
+        self.assertEqual(p.pods["source"]["status"], "EXITED")
+        self.assertEqual(p.mutations(), [("PATCH", "/pods/source", {"templateId": "template"})])
+        self.assertEqual(p.connect()["state"], "starting")
+        self.assertEqual(p.connect()["state"], "ready")
+        self.assertFalse(p.creates)
+
+    def test_lost_template_update_response_is_reconciled_without_duplicate_update(self):
+        p = Provider()
+        p.start_error = None
+        p.update_error = True
+        p.template["args"] = "updated startup"
+        self.assertEqual(p.connect()["state"], "starting")
+        self.assertEqual(p.connect()["state"], "starting")
+        self.assertEqual(len([call for call in p.calls if call[0] == "PATCH"]), 1)
+        self.assertEqual(p.pods["source"]["status"], "RUNNING")
+
+    def test_running_pod_is_not_reset_when_template_changes(self):
+        p = Provider()
+        p.pods["source"]["status"] = "RUNNING"
+        p.template["args"] = "updated startup"
+        self.assertEqual(p.connect()["state"], "ready")
+        self.assertFalse(p.mutations())
+
+    def test_stopped_template_update_refuses_unexpected_storage(self):
+        p = Provider()
+        p.template["args"] = "updated startup"
+        p.pods["source"]["global_mounts"] = []
+        with self.assertRaisesRegex(RuntimeError, "storage differs"):
+            p.connect()
+        self.assertFalse(p.mutations())
+
     def test_partial_inventory_retries_without_allocating_or_mutating(self):
         for pagination in (
             {"hasNextPage": True, "nextCursor": None},

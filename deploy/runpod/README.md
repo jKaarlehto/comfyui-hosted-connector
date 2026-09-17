@@ -111,6 +111,8 @@ Replacement creates a new Pod ID and SSH address. The starter retains the stoppe
 
 Use `python deploy/runpod/runpod.py replace` to queue recovery through the same starter. It reuses a healthy Pod, starts a stopped Pod when possible, and replaces it when capacity is unavailable. Owner commands resolve the current Pod by deployment identity.
 
+When startup code in the template changes, the starter applies it to a stopped Pod before resuming it. Running Pods are left alone; their configuration is updated on the next wake.
+
 Recovery progress is stored in the private GPU template's `NOTCH_RECOVERY` environment entry. Updating progress does not redeploy the starter. After an uncertain allocation response, the starter checks for the recorded attempt for at least two minutes and three separated inventories before retrying. Delayed duplicate allocations are reconciled and retired. Retries after cold starts or interrupted cleanup resume from the saved state. Unexpected ownership, configuration or storage changes stop recovery for owner review.
 
 `hosted.py setup --no-restart` updates the template and starter without restarting the Pod. Use it only when the running Pod already has the matching health command and key; normally setup applies those through a restart.

@@ -119,6 +119,11 @@ class Recovery:
         if self.state.get("retry_after", 0) > time.time():
             return starting("Waiting for GPU capacity; retrying once a minute")
         if pod and phase != "capacity":
+            if pod.get("args") != self.template.get("args"):
+                if self.mounts(pod) != self.expected_mounts():
+                    raise RuntimeError("The stopped Pod storage differs; refusing to change its configuration")
+                request(self.key, "PATCH", "/pods/" + pod["id"], {"templateId": self.template_id})
+                return starting("Applying updated startup settings before starting ComfyUI")
             try:
                 self.action(pod["id"], "start")
                 return starting("Starting hosted ComfyUI")
