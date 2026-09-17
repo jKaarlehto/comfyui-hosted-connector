@@ -14,6 +14,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tunnel = $null
 $work = $null
+$storageProgress = $null
 
 function Write-State([string]$Message) {
     Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message) -ForegroundColor Cyan
@@ -24,6 +25,67 @@ function Wait-Connection([int]$Seconds) {
         if ($StopFile -and (Test-Path -LiteralPath $StopFile)) { throw [OperationCanceledException]::new('Connection closed.') }
         Start-Sleep -Seconds 1
     }
+}
+
+function New-StorageProgress([string]$Url) {
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $false
+    $handler.UseProxy = $false
+    $client = New-Object Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromSeconds(3)
+    $client.MaxResponseContentBufferSize = 8192
+    return @{Client = $client; Url = "$Url/hosted_comfyui/storage"; Task = $null;
+        NextPoll = [DateTime]::MinValue; LastState = ''; Unsupported = $false}
+}
+
+function Get-StorageProgress($Poller) {
+    if ($Poller.Unsupported) { return }
+    if ($Poller.Task) {
+        if (!$Poller.Task.IsCompleted) { return }
+        $response = $null
+        try {
+            $response = $Poller.Task.GetAwaiter().GetResult()
+            if ([int]$response.StatusCode -eq 404) { $Poller.Unsupported = $true; return }
+            if (!$response.IsSuccessStatusCode) { return }
+            $value = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+            if ($value.phase -notin @('idle', 'downloading', 'verifying', 'error') -or
+                $value.filename -isnot [string] -or $value.filename.Length -gt 1024 -or
+                [string]$value.completed_bytes -notmatch '^\d{1,18}$' -or
+                [string]$value.total_bytes -notmatch '^\d{1,18}$') { return }
+            $completed = [long]$value.completed_bytes
+            $total = [long]$value.total_bytes
+            if ($total -gt 0 -and $completed -gt $total) { return }
+            $filename = $value.filename -replace '[\x00-\x1f\x7f]', ' '
+            $errorText = if ($value.error -is [string]) { $value.error -replace '[\x00-\x1f\x7f]', ' ' } else { '' }
+            if ($errorText.Length -gt 400) { $errorText = $errorText.Substring(0, 400) }
+            $percent = if ($total -gt 0) { [int][Math]::Floor(100.0 * $completed / $total) } else { -1 }
+            $amount = if ($total -gt 0) { $percent } else { [long][Math]::Floor($completed / 1MB) }
+            $key = "$($value.phase)|$filename|$amount|$errorText"
+            if ($key -eq $Poller.LastState) { return }
+            $Poller.LastState = $key
+            return [pscustomobject]@{phase = $value.phase; filename = $filename;
+                completed_bytes = $completed; total_bytes = $total; error = $errorText}
+        } catch { } finally {
+            if ($response) { $response.Dispose() }
+            $Poller.Task = $null
+            $Poller.NextPoll = (Get-Date).AddSeconds(1)
+        }
+    } elseif ((Get-Date) -ge $Poller.NextPoll) {
+        $Poller.Task = $Poller.Client.GetAsync($Poller.Url)
+    }
+}
+
+function Format-StorageProgress($Value) {
+    if ($Value.phase -eq 'idle') { return '' }
+    if ($Value.phase -eq 'error') { return "Model download failed: $($Value.filename)`r`n$($Value.error)" }
+    if ($Value.phase -eq 'verifying') { return "Verifying model: $($Value.filename)" }
+    $done = '{0:N1} MB' -f ($Value.completed_bytes / 1MB)
+    if ($Value.total_bytes -gt 0) {
+        $percent = [int][Math]::Floor(100.0 * $Value.completed_bytes / $Value.total_bytes)
+        return "Downloading model: $($Value.filename)`r`n$done / $('{0:N1} MB' -f ($Value.total_bytes / 1MB)) ($percent%)"
+    }
+    return "Downloading model: $($Value.filename)`r`n$done"
 }
 
 function Get-TunnelArguments($Remote, [string]$KeyFile, [string]$KnownHosts, [int]$Port) {
@@ -189,35 +251,52 @@ try {
     Write-Host "WebUI: $url" -ForegroundColor Green
     Write-Host "Notch: Host 127.0.0.1 | Port $LocalPort | Transport HTTP"
     Write-Host 'Keep this window open while using hosted ComfyUI.'
-    if ($ConnectorMode) {
+    if (!$CheckOnly) { $storageProgress = New-StorageProgress $url }
+    if ($ConnectorMode -and !$CheckOnly) {
         Write-Output "HOSTED_COMFYUI_READY=$url"
-        while (!$tunnel.HasExited) { Wait-Connection 1 }
+        while (!$tunnel.HasExited) {
+            $progress = Get-StorageProgress $storageProgress
+            if ($progress) {
+                $encodedProgress = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($progress | ConvertTo-Json -Compress)))
+                Write-Output "HOSTED_COMFYUI_STORAGE=$encodedProgress"
+            }
+            Wait-Connection 1
+        }
         throw 'The connection ended or the Pod parked. Reconnect to start it again.'
     } elseif (!$CheckOnly) {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
         $form = New-Object Windows.Forms.Form
         $form.Text = 'Hosted ComfyUI - Connected'
-        $form.ClientSize = New-Object Drawing.Size(480, 160)
+        $form.ClientSize = New-Object Drawing.Size(560, 210)
         $form.StartPosition = 'CenterScreen'
         $label = New-Object Windows.Forms.Label
         $label.Text = "Connected. Keep this window open.`r`nNotch: 127.0.0.1 : $LocalPort   |   Transport: HTTP"
         $label.Location = New-Object Drawing.Point(20, 20)
-        $label.Size = New-Object Drawing.Size(440, 45)
+        $label.Size = New-Object Drawing.Size(520, 45)
         $link = New-Object Windows.Forms.LinkLabel
         $link.Text = "Open ComfyUI: $url"
         $link.Location = New-Object Drawing.Point(20, 75)
-        $link.Size = New-Object Drawing.Size(440, 30)
+        $link.Size = New-Object Drawing.Size(520, 30)
         $link.add_LinkClicked({ Start-Process $url })
-        $form.Controls.AddRange(@($label, $link))
+        $modelStatus = New-Object Windows.Forms.Label
+        $modelStatus.Location = New-Object Drawing.Point(20, 115)
+        $modelStatus.Size = New-Object Drawing.Size(520, 70)
+        $form.Controls.AddRange(@($label, $link, $modelStatus))
         $timer = New-Object Windows.Forms.Timer
-        $timer.Interval = 2000
+        $timer.Interval = 1000
         $timer.add_Tick({
             if ($tunnel.HasExited) {
                 $form.Text = 'Hosted ComfyUI - Disconnected'
                 $label.Text = 'The connection ended or the Pod parked. Close this window and run the launcher again.'
                 $link.Enabled = $false
                 $timer.Stop()
+            } else {
+                $progress = Get-StorageProgress $storageProgress
+                if ($progress) {
+                    $modelStatus.Text = Format-StorageProgress $progress
+                    if ($modelStatus.Text) { Write-State ($modelStatus.Text -replace '\r?\n', ' | ') }
+                }
             }
         })
         $timer.Start()
@@ -231,6 +310,7 @@ try {
     Write-Host "Connection failed: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 } finally {
+    if ($storageProgress) { $storageProgress.Client.Dispose() }
     if ($tunnel -and !$tunnel.HasExited) { $tunnel.Kill(); $tunnel.WaitForExit() }
     if ($work) {
         $keyPath = Join-Path $work 'identity'

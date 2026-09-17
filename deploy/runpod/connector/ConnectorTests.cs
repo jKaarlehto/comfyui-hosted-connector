@@ -61,6 +61,7 @@ internal static class ConnectorTests
             Check(Storage.Quote(@"C:\User Data\test.ps1") == "\"C:\\User Data\\test.ps1\"");
             Reject(delegate { Storage.Quote("bad\"path"); });
             TestPresence();
+            TestModelProgress();
             using (var rejectedInstall = Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HostedComfyUIConnector.exe"), "--install unexpected")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true }))
             {
@@ -106,6 +107,36 @@ internal static class ConnectorTests
             return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }
+    }
+
+    private static void TestModelProgress()
+    {
+        var fields = new Dictionary<string, object> { { "phase", "downloading" }, { "filename", "models/checkpoints/example.safetensors" },
+            { "completed_bytes", 5368709120L }, { "total_bytes", 10737418240L } };
+        ModelProgress value;
+        Check(ModelProgress.TryDecode(Encode(fields), out value) && value.Percent == 50 && value.Text.Contains("50%"));
+        Check(value.Completed == 5368709120L && value.Total == 10737418240L && value.Text.Contains("MB"));
+        fields["phase"] = "verifying";
+        Check(ModelProgress.TryDecode(Encode(fields), out value) && value.Text.StartsWith("Verifying model:"));
+        fields["phase"] = "idle";
+        Check(ModelProgress.TryDecode(Encode(fields), out value) && value.Text == "");
+        fields["phase"] = "error"; fields["error"] = "Retry\r\nrequest";
+        Check(ModelProgress.TryDecode(Encode(fields), out value) && value.Error == "Retry  request" && value.Text.StartsWith("Model download failed:"));
+        fields["phase"] = "downloading"; fields["total_bytes"] = 0;
+        Check(ModelProgress.TryDecode(Encode(fields), out value) && value.Percent == -1 && !value.Text.Contains("%"));
+        fields["total_bytes"] = 1;
+        Check(!ModelProgress.TryDecode(Encode(fields), out value));
+        fields["completed_bytes"] = -1;
+        Check(!ModelProgress.TryDecode(Encode(fields), out value));
+        fields["completed_bytes"] = "1";
+        Check(!ModelProgress.TryDecode(Encode(fields), out value));
+        fields["completed_bytes"] = 1; fields["phase"] = "execute";
+        Check(!ModelProgress.TryDecode(Encode(fields), out value));
+        fields["phase"] = "idle"; fields["filename"] = new String('a', 1025);
+        Check(!ModelProgress.TryDecode(Encode(fields), out value));
+        Check(!ModelProgress.TryDecode("invalid", out value));
+        Check(!ModelProgress.TryDecode(new String('A', 12001), out value));
+        Check(!ModelProgress.TryDecode(null, out value));
     }
 
     private static void TestPresence()

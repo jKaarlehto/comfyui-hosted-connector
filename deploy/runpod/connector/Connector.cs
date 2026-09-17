@@ -226,11 +226,58 @@ namespace HostedComfyUI
         public void Dispose() { if (handle != IntPtr.Zero) { CloseHandle(handle); handle = IntPtr.Zero; } }
     }
 
+    internal sealed class ModelProgress
+    {
+        internal string Phase, Filename, Error;
+        internal long Completed, Total;
+        internal int Percent { get { return Total > 0 ? (int)(100.0 * Completed / Total) : -1; } }
+        internal string Text
+        {
+            get
+            {
+                if (Phase == "idle") return String.Empty;
+                if (Phase == "error") return "Model download failed: " + Filename + "\r\n" + Error;
+                if (Phase == "verifying") return "Verifying model: " + Filename;
+                string size = String.Format("{0:N1} MB", Completed / 1048576.0);
+                if (Total > 0) size += String.Format(" / {0:N1} MB ({1}%)", Total / 1048576.0, Percent);
+                return "Downloading model: " + Filename + "\r\n" + size;
+            }
+        }
+        internal static bool TryDecode(string encoded, out ModelProgress value)
+        {
+            value = null;
+            if (encoded == null || encoded.Length > 12000) return false;
+            try
+            {
+                string json = new UTF8Encoding(false, true).GetString(Convert.FromBase64String(encoded));
+                var fields = new JavaScriptSerializer { MaxJsonLength = 8192 }.DeserializeObject(json) as Dictionary<string, object>;
+                object phase, filename, completed, total, error;
+                if (fields == null || !fields.TryGetValue("phase", out phase) || !(phase is string) ||
+                    !fields.TryGetValue("filename", out filename) || !(filename is string) || ((string)filename).Length > 1024 ||
+                    !fields.TryGetValue("completed_bytes", out completed) || !(completed is int || completed is long) ||
+                    !fields.TryGetValue("total_bytes", out total) || !(total is int || total is long)) return false;
+                if ((string)phase != "idle" && (string)phase != "downloading" && (string)phase != "verifying" && (string)phase != "error") return false;
+                long done = Convert.ToInt64(completed), size = Convert.ToInt64(total);
+                if (done < 0 || size < 0 || (size > 0 && done > size)) return false;
+                string detail = fields.TryGetValue("error", out error) && error is string ? (string)error : String.Empty;
+                if (detail.Length > 400) detail = detail.Substring(0, 400);
+                value = new ModelProgress { Phase = (string)phase, Filename = Clean((string)filename),
+                    Completed = done, Total = size, Error = Clean(detail) };
+                return true;
+            }
+            catch (Exception) { return false; }
+        }
+        private static string Clean(string text) { return Regex.Replace(text, "[\\x00-\\x1f\\x7f]", " "); }
+    }
+
     internal sealed class ConnectorForm : Form
     {
         private readonly TextBox log = new TextBox();
         private readonly LinkLabel link = new LinkLabel();
         private readonly Button reconnect = new Button();
+        private readonly Panel modelPanel = new Panel();
+        private readonly Label modelStatus = new Label();
+        private readonly ProgressBar modelProgress = new ProgressBar();
         private Process process;
         private ChildJob job;
         private string activeInvitation;
@@ -243,7 +290,7 @@ namespace HostedComfyUI
         internal ConnectorForm()
         {
             Text = "Hosted ComfyUI Connector";
-            ClientSize = new Size(620, 350);
+            ClientSize = new Size(620, 430);
             MinimumSize = new Size(500, 300);
             StartPosition = FormStartPosition.CenterScreen;
             log.Multiline = true; log.ReadOnly = true; log.ScrollBars = ScrollBars.Vertical;
@@ -255,7 +302,11 @@ namespace HostedComfyUI
             reconnect.Text = "Reconnect"; reconnect.Enabled = false;
             reconnect.Click += delegate { Connect(activeInvitation); };
             footer.Controls.Add(link); footer.Controls.Add(reconnect);
-            Controls.Add(log); Controls.Add(footer);
+            modelPanel.Dock = DockStyle.Bottom; modelPanel.Height = 82; modelPanel.Padding = new Padding(8); modelPanel.Visible = false;
+            modelStatus.Dock = DockStyle.Fill; modelStatus.AutoEllipsis = true;
+            modelProgress.Dock = DockStyle.Bottom; modelProgress.Height = 16;
+            modelPanel.Controls.Add(modelStatus); modelPanel.Controls.Add(modelProgress);
+            Controls.Add(log); Controls.Add(modelPanel); Controls.Add(footer);
             string saved = Path.Combine(Storage.Root, ".env");
             if (File.Exists(saved))
             {
@@ -291,7 +342,8 @@ namespace HostedComfyUI
                 stopPath = Path.Combine(Storage.Root, "stop-" + Guid.NewGuid().ToString("N"));
                 sessionPath = Path.Combine(Storage.Root, "session-" + Guid.NewGuid().ToString("N"));
                 File.WriteAllText(accessPath, activeInvitation, new UTF8Encoding(false));
-                log.Clear(); link.Enabled = false; reconnect.Enabled = false;
+                log.Clear(); link.Enabled = false; reconnect.Enabled = false; modelPanel.Visible = false;
+                Text = "Hosted ComfyUI - Connecting";
                 var info = new ProcessStartInfo(Program.PowerShell,
                     "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Storage.Quote(script) +
                     " -AccessFile " + Storage.Quote(accessPath) + " -EnvFile " + Storage.Quote(Path.Combine(Storage.Root, ".env")) +
@@ -301,7 +353,7 @@ namespace HostedComfyUI
                 process = new Process { StartInfo = info, EnableRaisingEvents = true };
                 process.OutputDataReceived += Output;
                 process.ErrorDataReceived += Output;
-                process.Exited += delegate(object sender, EventArgs args) { Post(delegate { if (!closing && Object.ReferenceEquals(sender, process)) { link.Enabled = false; reconnect.Enabled = true; Append("Connection ended. Click Reconnect to try again."); } }); };
+                process.Exited += delegate(object sender, EventArgs args) { Post(delegate { if (!closing && Object.ReferenceEquals(sender, process)) { link.Enabled = false; reconnect.Enabled = true; modelPanel.Visible = false; Text = "Hosted ComfyUI - Disconnected"; Append("Connection ended. Click Reconnect to try again."); } }); };
                 process.Start(); job.Add(process);
                 process.BeginOutputReadLine(); process.BeginErrorReadLine();
             }
@@ -318,6 +370,19 @@ namespace HostedComfyUI
                 {
                     link.Enabled = true; Text = "Hosted ComfyUI - Connected";
                     DeleteAccessFile(); OpenBrowser();
+                }
+                else if (args.Data.StartsWith("HOSTED_COMFYUI_STORAGE=", StringComparison.Ordinal))
+                {
+                    ModelProgress value;
+                    if (link.Enabled && ModelProgress.TryDecode(args.Data.Substring("HOSTED_COMFYUI_STORAGE=".Length), out value))
+                    {
+                        modelStatus.Text = value.Text;
+                        modelPanel.Visible = value.Phase != "idle";
+                        modelProgress.Visible = value.Phase != "error";
+                        modelProgress.Style = value.Percent < 0 || value.Phase == "verifying"
+                            ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
+                        modelProgress.Value = Math.Max(0, value.Percent);
+                    }
                 }
                 else Append(args.Data);
             });

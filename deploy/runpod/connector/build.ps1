@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$SiteUrl = '',
-    [string]$Version = '1.0.2.0',
+    [string]$Version = '1.0.3.0',
     [string]$CertificateThumbprint = '',
     [string]$Publisher = 'CN=ComfyUI-Notch',
     [switch]$Package,
@@ -38,6 +38,7 @@ if ($Test) {
     $tokens = $null; $errors = $null
     [Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$tokens, [ref]$errors) | Out-Null
     if ($errors.Count) { throw ($errors | Out-String) }
+    & (Join-Path $PSScriptRoot 'ProgressTests.ps1')
 }
 $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
 $sdk = Get-ChildItem -LiteralPath $sdkRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Where-Object { Test-Path (Join-Path $_.FullName 'x64\makeappx.exe') } | Select-Object -First 1
