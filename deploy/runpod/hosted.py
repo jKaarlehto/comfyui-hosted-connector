@@ -9,6 +9,7 @@ import subprocess
 import sys
 import urllib.parse
 import uuid
+import zlib
 from pathlib import Path
 
 import runpod as owner
@@ -83,14 +84,20 @@ def main():
         revoke(args, key, state, state_file)
 
 
-def starter_code():
+def starter_source():
     bootstrap = "import subprocess,sys\nfrom pathlib import Path\n"
     bootstrap += f"subprocess.run([sys.executable,'-m','pip','install','--disable-pip-version-check','--no-cache-dir','runpod=={SDK_VERSION}','paramiko==4.0.0'],check=True)\n"
     for name in ("broker.py", "recovery.py"):
         source = Path(__file__).with_name(name).read_text(encoding="utf-8")
         bootstrap += "Path('/opt/" + name + "').write_text(" + repr(source) + ")\n"
     bootstrap += "subprocess.run([sys.executable,'-u','/opt/broker.py'],check=True)\n"
-    return json.dumps({"entrypoint": ["python3", "-u", "-c"], "cmd": [bootstrap]})
+    return bootstrap
+
+
+def starter_code():
+    encoded = base64.b64encode(zlib.compress(starter_source().encode(), 9)).decode()
+    command = "import base64,zlib;exec(zlib.decompress(base64.b64decode(" + repr(encoded) + ")))"
+    return json.dumps({"entrypoint": ["python3", "-u", "-c"], "cmd": [command]})
 
 
 def setup(args, key, state, state_file):

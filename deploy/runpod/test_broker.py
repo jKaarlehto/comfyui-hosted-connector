@@ -1,6 +1,7 @@
 """Tester requests cannot select Pods or issue owner operations."""
 
 import os
+import json
 import unittest
 from unittest.mock import patch
 
@@ -30,9 +31,16 @@ class StarterTests(unittest.TestCase):
         api.assert_called_once_with("owner-key", "fixed-starter")
 
     def test_bootstrap_includes_recovery_module(self):
-        bootstrap = hosted.starter_code()
+        bootstrap = hosted.starter_source()
         self.assertIn("/opt/recovery.py", bootstrap)
         self.assertIn("/opt/broker.py", bootstrap)
+
+    def test_compact_bootstrap_reconstructs_the_exact_source(self):
+        payload = json.loads(hosted.starter_code())
+        decoded = []
+        exec(payload["cmd"][0], {"exec": decoded.append})
+        self.assertEqual(decoded, [hosted.starter_source().encode()])
+        self.assertLess(len(payload["cmd"][0].encode()), 8192)
 
 
 if __name__ == "__main__":

@@ -60,7 +60,8 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(secrets.call_count, 3)
             resolve.assert_not_called()
             process.assert_called_once()
-            self.assertIn("paramiko==4.0.0", body["args"])
+            self.assertEqual(body["args"], hosted.starter_code())
+            self.assertIn("paramiko==4.0.0", hosted.starter_source())
 
     def test_template_setup_preserves_durable_recovery_and_embeds_health(self):
         with tempfile.TemporaryDirectory() as directory:
