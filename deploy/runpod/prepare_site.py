@@ -1,7 +1,9 @@
 """Prepare the public invitation page and explicit connector downloads."""
 
 import argparse
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -44,9 +46,11 @@ def prepare_site(output, installer=None, appinstaller=None, package=None):
     for artifact in artifacts.values():
         if artifact and not artifact.is_file():
             raise FileNotFoundError(artifact)
+    site_files = {name: (source / name).read_bytes() for name in SITE_FILES}
+    version_site_assets(site_files, installer.read_bytes() if installer else None)
     output.mkdir(parents=True, exist_ok=True)
-    for name in SITE_FILES:
-        shutil.copyfile(source / name, output / name)
+    for name, content in site_files.items():
+        (output / name).write_bytes(content)
     downloads = output / "downloads"
     downloads.mkdir(exist_ok=True)
     for name, artifact in artifacts.items():
@@ -58,6 +62,26 @@ def prepare_site(output, installer=None, appinstaller=None, package=None):
     release = {"installerAvailable": installer is not None, "appInstallerAvailable": appinstaller is not None}
     (downloads / "release.json").write_text(json.dumps(release) + "\n", encoding="utf-8")
     print("Public invitation site prepared:", output)
+
+
+def version_site_assets(site_files, installer=None):
+    asset_data = dict(site_files)
+    index_assets = ["connect.js", "style.css"]
+    if installer is not None:
+        asset_data["downloads/HostedComfyUIConnector.exe"] = installer
+        index_assets.append("downloads/HostedComfyUIConnector.exe")
+    for page, assets in (
+        ("index.html", index_assets),
+        ("installed.html", ("installed.js", "style.css")),
+    ):
+        html = site_files[page].decode("utf-8")
+        for asset in assets:
+            digest = hashlib.sha256(asset_data[asset]).hexdigest()
+            pattern = r"(\b(?:src|href)\s*=\s*)([\"'])" + re.escape(asset) + r"(?:\?[^\"']*)?\2"
+            html, count = re.subn(pattern, lambda match: match[1] + match[2] + asset + "?v=" + digest + match[2], html)
+            if not count:
+                raise RuntimeError(f"{page} does not reference the expected local asset: {asset}")
+        site_files[page] = html.encode("utf-8")
 
 
 if __name__ == "__main__":

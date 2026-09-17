@@ -2,12 +2,14 @@
 
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import sys
 import tempfile
 import types
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
@@ -75,6 +77,10 @@ class InvitationSiteTests(unittest.TestCase):
             )
             release = json.loads((output / "downloads" / "release.json").read_text())
             self.assertEqual(release, {"installerAvailable": True, "appInstallerAvailable": False})
+            self.assertIn(
+                'href="downloads/HostedComfyUIConnector.exe?v=' + hashlib.sha256(installer.read_bytes()).hexdigest() + '"',
+                (output / "index.html").read_text(encoding="utf-8"),
+            )
             (output / ".env").write_text("owner-secret")
             with self.assertRaisesRegex(RuntimeError, "unexpected file"):
                 prepare_site.prepare_site(output, installer)
@@ -100,6 +106,66 @@ class InvitationSiteTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Untrusted signature"):
                 prepare_site.main()
             stage.assert_not_called()
+
+    def test_staged_html_references_exact_staged_asset_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            prepare_site.prepare_site(output)
+            for page, assets in (
+                ("index.html", ("connect.js", "style.css")),
+                ("installed.html", ("installed.js", "style.css")),
+            ):
+                references = HtmlAssets()
+                references.feed((output / page).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    set(references.urls),
+                    {asset + "?v=" + hashlib.sha256((output / asset).read_bytes()).hexdigest() for asset in assets},
+                )
+
+    def test_asset_version_changes_only_for_changed_bytes(self):
+        site_files = {
+            "index.html": b'<link href="style.css"><script src="connect.js"></script>',
+            "installed.html": b"<link href='style.css'><script src='installed.js'></script>",
+            "style.css": b"body { color: black; }",
+            "connect.js": b"first connect script",
+            "installed.js": b"first installed script",
+        }
+        prepare_site.version_site_assets(site_files)
+        original = dict(site_files)
+        prepare_site.version_site_assets(site_files)
+        self.assertEqual(site_files, original, "Repeated staging must produce stable URLs")
+        site_files["connect.js"] = b"changed connect script"
+        prepare_site.version_site_assets(site_files)
+        self.assertNotEqual(site_files["index.html"], original["index.html"])
+        self.assertEqual(site_files["installed.html"], original["installed.html"])
+        self.assertIn(hashlib.sha256(site_files["connect.js"]).hexdigest().encode(), site_files["index.html"])
+        site_files["style.css"] = b"changed shared style"
+        prepare_site.version_site_assets(site_files)
+        style_hash = hashlib.sha256(site_files["style.css"]).hexdigest().encode()
+        self.assertIn(style_hash, site_files["index.html"])
+        self.assertIn(style_hash, site_files["installed.html"])
+
+    def test_unexpected_asset_reference_stops_staging(self):
+        site_files = {
+            "index.html": b'<script src="https://example.test/connect.js"></script>',
+            "installed.html": b"",
+            "connect.js": b"script",
+        }
+        with self.assertRaisesRegex(RuntimeError, "expected local asset"):
+            prepare_site.version_site_assets(site_files)
+
+
+class HtmlAssets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.urls = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "script" and "src" in attributes:
+            self.urls.append(attributes["src"])
+        elif tag == "link" and attributes.get("rel") == "stylesheet":
+            self.urls.append(attributes["href"])
 
 
 if __name__ == "__main__":

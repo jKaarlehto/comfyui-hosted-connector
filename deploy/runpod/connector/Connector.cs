@@ -112,41 +112,14 @@ namespace HostedComfyUI
             return GetCurrentPackageFullName(ref length, null) != 15700;
         }
 
-        internal static bool EnsureInstalled()
+        internal static bool EnsureInstalled(bool hasInvitation)
         {
-            if (IsPackaged()) { AcknowledgeInstall(false); return true; }
+            if (IsPackaged()) return true;
             if (String.Equals(Application.ExecutablePath, ExePath, StringComparison.OrdinalIgnoreCase)) return true;
-            if (MessageBox.Show("Install Hosted ComfyUI Connector for your Windows account?\n\nIt opens invitation links and keeps the local connection running. No administrator access is needed.",
+            if (MessageBox.Show("Install Hosted ComfyUI Connector for your Windows account?\n\nIt opens invitation links and keeps the local connection running. A small background helper starts at sign-in so the invitation page can detect it. It does not start a Pod or tunnel. No administrator access is needed.",
                 "Hosted ComfyUI Connector", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK) return false;
             Install();
-            AcknowledgeInstall(true);
-            return true;
-        }
-
-        internal static void AcknowledgeInstall(bool explicitInstall)
-        {
-            Storage.ProtectDirectory(Storage.Root);
-            AcknowledgeInstall(Path.Combine(Storage.Root, "installed"), explicitInstall, OpenInstallPage);
-        }
-
-        internal static void AcknowledgeInstall(string marker, bool explicitInstall, Action openPage)
-        {
-            if (!explicitInstall && File.Exists(marker)) return;
-            openPage();
-            File.WriteAllText(marker, "1");
-        }
-
-        private static void OpenInstallPage()
-        {
-            using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("site.txt"))
-            using (var reader = new StreamReader(stream))
-            {
-                string site = reader.ReadToEnd().Trim();
-                Uri uri;
-                if (Uri.TryCreate(site, UriKind.Absolute, out uri) && uri.Scheme == "https" &&
-                    uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0)
-                    Process.Start(new ProcessStartInfo(site.TrimEnd('/') + "/installed.html") { UseShellExecute = true });
-            }
+            return hasInvitation;
         }
 
         internal static void Install()
@@ -157,9 +130,16 @@ namespace HostedComfyUI
                 if (!String.IsNullOrEmpty(command) && command != Storage.Quote(ExePath) + " \"%1\"")
                     throw new InvalidOperationException("The hosted-comfyui protocol is already registered to another application.");
             }
+            Presence.Stop();
             Directory.CreateDirectory(DirectoryPath);
             if (!String.Equals(Application.ExecutablePath, ExePath, StringComparison.OrdinalIgnoreCase))
-                File.Copy(Application.ExecutablePath, ExePath, true);
+            {
+                for (int attempt = 0; ; attempt++)
+                {
+                    try { File.Copy(Application.ExecutablePath, ExePath, true); break; }
+                    catch (IOException) { if (attempt == 19) throw; Thread.Sleep(100); }
+                }
+            }
             using (RegistryKey protocol = Registry.CurrentUser.CreateSubKey(Protocol))
             {
                 protocol.SetValue("", "URL:Hosted ComfyUI Connector");
@@ -169,7 +149,7 @@ namespace HostedComfyUI
             using (RegistryKey uninstall = Registry.CurrentUser.CreateSubKey(Uninstall))
             {
                 uninstall.SetValue("DisplayName", "Hosted ComfyUI Connector");
-                uninstall.SetValue("DisplayVersion", "1.0.1");
+                uninstall.SetValue("DisplayVersion", Presence.Version);
                 uninstall.SetValue("Publisher", "ComfyUI-Notch");
                 uninstall.SetValue("InstallLocation", DirectoryPath);
                 uninstall.SetValue("UninstallString", Storage.Quote(ExePath) + " --uninstall");
@@ -182,6 +162,8 @@ namespace HostedComfyUI
             shortcut.GetType().InvokeMember("Description", BindingFlags.SetProperty, null, shortcut, new object[] { "Connect to hosted ComfyUI" });
             shortcut.GetType().InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
             Marshal.ReleaseComObject(shortcut); Marshal.ReleaseComObject(shell);
+            Presence.RegisterStartup();
+            Presence.Start();
         }
 
         internal static void Remove()
@@ -193,6 +175,8 @@ namespace HostedComfyUI
                 if (command != null && (string)command.GetValue("") != Storage.Quote(ExePath) + " \"%1\"")
                     throw new InvalidOperationException("The protocol registration belongs to another application.");
             }
+            Presence.Stop();
+            Presence.RemoveStartup();
             Registry.CurrentUser.DeleteSubKeyTree(Protocol, false);
             Registry.CurrentUser.DeleteSubKeyTree(Uninstall, false);
             if (File.Exists(Shortcut)) File.Delete(Shortcut);
@@ -375,14 +359,31 @@ namespace HostedComfyUI
     internal static class Program
     {
         internal static readonly string PowerShell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), @"System32\WindowsPowerShell\v1.0\powershell.exe");
+        internal static readonly string InstanceName = @"Local\HostedComfyUIConnector-" + WindowsIdentity.GetCurrent().User.Value;
 
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args.Length > 0 && args[0] == "--presence")
+            {
+                if (args.Length != 1) { Environment.ExitCode = 2; return; }
+                try { Environment.ExitCode = Presence.Run(); }
+                catch (Exception) { Environment.ExitCode = 1; }
+                return;
+            }
             if (args.Length > 0 && args[0] == "--install")
             {
                 if (args.Length != 1) { Console.Error.WriteLine("--install takes no additional arguments."); Environment.ExitCode = 2; return; }
-                try { Installer.Install(); Installer.AcknowledgeInstall(true); }
+                try
+                {
+                    Mutex running;
+                    if (Mutex.TryOpenExisting(InstanceName, out running))
+                    {
+                        running.Dispose();
+                        throw new InvalidOperationException("Close Hosted ComfyUI Connector before updating it.");
+                    }
+                    Installer.Install();
+                }
                 catch (Exception error) { Console.Error.WriteLine(error.Message); Environment.ExitCode = 1; }
                 return;
             }
@@ -390,7 +391,7 @@ namespace HostedComfyUI
             Application.SetCompatibleTextRenderingDefault(false);
             try
             {
-                string name = "HostedComfyUIConnector-" + WindowsIdentity.GetCurrent().User.Value;
+                string name = InstanceName.Substring("Local\\".Length);
                 if (args.Length == 1 && args[0] == "--uninstall")
                 {
                     Mutex running;
@@ -422,7 +423,7 @@ namespace HostedComfyUI
                         }
                         return;
                     }
-                    if (!Installer.EnsureInstalled()) return;
+                    if (!Installer.EnsureInstalled(invitation.Length != 0)) return;
                     var form = new ConnectorForm();
                     var thread = new Thread(delegate() { Listen(name, form); });
                     thread.IsBackground = true;
