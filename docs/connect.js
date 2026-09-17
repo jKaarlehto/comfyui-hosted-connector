@@ -24,6 +24,27 @@ function initializePage() {
   let token;
   let installRequest = "";
   let channel;
+  let confirmed = false;
+  let confirmationSaved = false;
+  try { confirmed = confirmationSaved = localStorage.getItem("hosted-comfyui-install-confirmed") === "1"; } catch { }
+  const renderInstallState = () => {
+    document.getElementById("download").hidden = confirmed;
+    connect.className = confirmed ? "button primary" : "button secondary";
+    connect.textContent = confirmed ? "Connect" : "Already installed? Connect";
+    document.getElementById("install-help").textContent = confirmed ? "Help or reinstall" : "Installation help";
+    document.getElementById("install-status").textContent = confirmed
+      ? (confirmationSaved ? "Installation was confirmed in this browser." : "Installation confirmed for this visit.")
+      : "Install the Windows connector to open this workspace.";
+  };
+  const confirmInstallation = () => {
+    confirmed = true;
+    try {
+      localStorage.setItem("hosted-comfyui-install-confirmed", "1");
+      confirmationSaved = true;
+    } catch { }
+    renderInstallState();
+  };
+  renderInstallState();
   try {
     token = invitationToken(window.location.hash);
     connect.disabled = false;
@@ -48,6 +69,7 @@ function initializePage() {
   };
   connect.addEventListener("click", () => { cancelInstallRequest(); openConnector(); });
   const beginInstall = () => {
+    document.getElementById("install-guide").open = true;
     if (!token) return;
     installRequest = crypto.randomUUID();
     try {
@@ -55,11 +77,13 @@ function initializePage() {
     } catch { installRequest = ""; }
   };
   document.getElementById("download").addEventListener("click", beginInstall);
+  document.getElementById("reinstall").addEventListener("click", beginInstall);
   document.getElementById("appinstaller-download").addEventListener("click", beginInstall);
   const acknowledgeInstall = () => {
+    confirmInstallation();
     if (!token) return;
     document.getElementById("install-guide").open = false;
-    status.textContent = "Connector installed. Click Connect to open your workspace.";
+    status.textContent = "Installation confirmed. Click Connect to open your workspace.";
     connect.focus();
   };
   document.getElementById("installed").addEventListener("click", () => {
@@ -68,6 +92,7 @@ function initializePage() {
     openConnector();
   });
   const receiveInstall = (message) => {
+    if (message && message.type === "installation-confirmed") { confirmInstallation(); return; }
     if (!message || message.type !== "installed" || !installRequest || message.requestId !== installRequest) return;
     try {
       const pending = JSON.parse(localStorage.getItem("hosted-comfyui-install-request"));
@@ -94,6 +119,10 @@ function initializePage() {
     } catch { }
   }
   window.addEventListener("storage", (event) => {
+    if (event.key === "hosted-comfyui-install-confirmed" && event.newValue === "1") {
+      confirmed = confirmationSaved = true;
+      renderInstallState();
+    }
     if (event.key === "hosted-comfyui-install-event" && event.newValue) {
       try { receiveInstall(JSON.parse(event.newValue)); } catch { }
     }
@@ -105,9 +134,11 @@ function initializePage() {
         document.getElementById("appinstaller-option").hidden = false;
       }
       if (release && release.installerAvailable === false) {
-        const download = document.getElementById("download");
-        download.removeAttribute("href");
-        download.setAttribute("aria-disabled", "true");
+        for (const id of ["download", "reinstall"]) {
+          const download = document.getElementById(id);
+          download.removeAttribute("href");
+          download.setAttribute("aria-disabled", "true");
+        }
         document.getElementById("download-status").textContent = "The connector download is being prepared. Please return shortly.";
       }
     })

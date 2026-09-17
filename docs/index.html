@@ -13,13 +13,17 @@
   <main>
     <h1>Hosted ComfyUI</h1>
     <p>Connect to the workspace you were invited to. Its WebUI will open when ready.</p>
-    <button id="connect" class="button primary" type="button" disabled>Connect</button>
+    <div class="actions">
+      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download and install</a>
+      <button id="connect" class="button secondary" type="button" disabled>Already installed? Connect</button>
+    </div>
+    <p id="install-status" class="note">Install the Windows connector to open this workspace.</p>
     <p id="status" class="note" role="status" aria-live="polite">Checking invitation…</p>
     <details id="install-guide">
-      <summary>First time, or nothing opened?</summary>
+      <summary id="install-help">Installation help</summary>
       <h2>Install the Windows connector</h2>
       <ol>
-        <li><a id="download" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download the connector</a>.</li>
+        <li><a id="reinstall" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download or reinstall the connector</a>.</li>
         <li>Open the downloaded file. Look in your browser's downloads menu, usually near the upper right, or your Downloads folder.</li>
         <li>Finish installation. This tab will try to continue automatically; click Connect if your browser asks.</li>
       </ol>
