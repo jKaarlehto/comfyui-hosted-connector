@@ -9,6 +9,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -25,57 +26,46 @@ git -C "$COMFYUI_DIR" fetch --quiet --depth=1 https://github.com/Comfy-Org/Comfy
 git -C "$COMFYUI_DIR" checkout --quiet --detach FETCH_HEAD || exit $?
 echo "[Notch Runpod] ComfyUI revision $(git -C "$COMFYUI_DIR" rev-parse HEAD) ($NOTCH_COMFY_REF)"
 """
+STATUS_SCRIPT = """
+NOTCH_BOOT_STAGE=starting_services
+notch_stage() {
+    NOTCH_BOOT_STAGE="$1"
+    printf '{"stage":"%s"}\\n' "$NOTCH_BOOT_STAGE" > /opt/notch-startup-stage.tmp
+    mv /opt/notch-startup-stage.tmp /opt/notch-startup-stage
+}
+notch_failed() {
+    printf '{"stage":"%s","error":true}\\n' "$NOTCH_BOOT_STAGE" > /opt/notch-startup-stage.tmp
+    mv /opt/notch-startup-stage.tmp /opt/notch-startup-stage
+    sleep 30
+}
+trap 'if [ $? -ne 0 ]; then notch_failed; fi' EXIT
+"""
+
+
+def set_stage(stage, error=False):
+    path = Path("/opt/notch-startup-stage")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"stage": stage, "error": error}))
+    temporary.replace(path)
+
+
+def start_ssh():
+    folder = Path("/root/.ssh")
+    folder.mkdir(mode=0o700, exist_ok=True)
+    folder.chmod(0o700)
+    keys = folder / "authorized_keys"
+    keys.write_text(os.environ["PUBLIC_KEY"].strip() + "\n")
+    keys.chmod(0o600)
+    Path("/run/sshd").mkdir(exist_ok=True)
+    subprocess.run(["ssh-keygen", "-A", "-q"], check=True)
+    subprocess.run(["/usr/sbin/sshd", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no"], check=True)
 
 
 def main():
+    set_stage("starting_services")
     startup = Path("/start.sh").read_bytes()
     if hashlib.sha256(startup).hexdigest() != START_SHA256:
         raise RuntimeError("The base image changed; review its startup script before updating the image pin")
-    revision = os.environ["NOTCH_PLUGIN_REF"]
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", revision):
-        raise ValueError("NOTCH_PLUGIN_REF must be a branch, tag or commit SHA")
-    os.environ["NOTCH_COMFY_REF"] = resolve_comfy_ref(os.environ.get("NOTCH_COMFY_REF", "stable"))
-    encoded_key = os.environ.pop("NOTCH_GIT_KEY_B64")
-    if "RUNPOD_SECRET" in encoded_key:
-        raise RuntimeError("Runpod did not resolve the plugin deploy-key secret")
-    repository = os.environ.get("NOTCH_PLUGIN_REPO", "jKaarlehto/ComfyUI-Notch")
-    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
-        raise ValueError("NOTCH_PLUGIN_REPO must be a GitHub owner/repository")
-    checkout = Path("/opt/notch-plugin")
-    checkout.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="notch-git-", dir="/dev/shm") as directory:
-        key = Path(directory, "key")
-        key.write_bytes(base64.b64decode(encoded_key, validate=True))
-        key.chmod(0o600)
-        known = Path(directory, "known_hosts")
-        known.write_text("[ssh.github.com]:443 " + GITHUB_HOST_KEY + "\n")
-        git_env = os.environ.copy()
-        git_env["GIT_TERMINAL_PROMPT"] = "0"
-        git_env["GIT_SSH_COMMAND"] = shlex.join(
-            [
-                "ssh",
-                "-i",
-                str(key),
-                "-p",
-                "443",
-                "-o",
-                "Hostname=ssh.github.com",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=20",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                "UserKnownHostsFile=" + str(known),
-            ]
-        )
-        actual = checkout_plugin(checkout, repository, revision, git_env)
-    print("[Notch Runpod] Plugin revision " + actual + " (" + revision + ")", flush=True)
-    prepare_http_requirements(checkout / "requirements.txt", Path("/opt/notch-http-requirements.txt"))
-
     store = os.environ.get("NOTCH_GLOBAL_STORE", "")
     if store:
         if not Path(store).is_mount():
@@ -132,9 +122,59 @@ def main():
             )
         os.environ["PUBLIC_KEY"] = "\n".join(keys)
     Path("/opt/notch-park.py").write_text(_PARK_SCRIPT, encoding="utf-8")
+    encoded_key = os.environ.pop("NOTCH_GIT_KEY_B64")
+    start_ssh()
+    set_stage("checking_updates")
+    os.environ["NOTCH_COMFY_REF"] = resolve_comfy_ref(os.environ.get("NOTCH_COMFY_REF", "stable"))
+    set_stage("fetching_plugin")
+    revision = os.environ["NOTCH_PLUGIN_REF"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", revision):
+        raise ValueError("NOTCH_PLUGIN_REF must be a branch, tag or commit SHA")
+    if "RUNPOD_SECRET" in encoded_key:
+        raise RuntimeError("Runpod did not resolve the plugin deploy-key secret")
+    repository = os.environ.get("NOTCH_PLUGIN_REPO", "jKaarlehto/ComfyUI-Notch")
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
+        raise ValueError("NOTCH_PLUGIN_REPO must be a GitHub owner/repository")
+    checkout = Path("/opt/notch-plugin")
+    checkout.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="notch-git-", dir="/dev/shm") as directory:
+        key = Path(directory, "key")
+        key.write_bytes(base64.b64decode(encoded_key, validate=True))
+        key.chmod(0o600)
+        known = Path(directory, "known_hosts")
+        known.write_text("github.com " + GITHUB_HOST_KEY + "\n[ssh.github.com]:443 " + GITHUB_HOST_KEY + "\n")
+        git_env = os.environ.copy()
+        git_env["GIT_TERMINAL_PROMPT"] = "0"
+        git_env["GIT_SSH_COMMAND"] = shlex.join(
+            [
+                "ssh",
+                "-i",
+                str(key),
+                "-p",
+                "443",
+                "-o",
+                "Hostname=ssh.github.com",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=20",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "UserKnownHostsFile=" + str(known),
+            ]
+        )
+        actual = checkout_plugin(checkout, repository, revision, git_env)
+    print("[Notch Runpod] Plugin revision " + actual + " (" + revision + ")", flush=True)
+    prepare_http_requirements(checkout / "requirements.txt", Path("/opt/notch-http-requirements.txt"))
+
+    set_stage("starting_services")
     hook = (
-        COMFY_UPDATE_SCRIPT
+        "notch_stage updating_comfy\n" + COMFY_UPDATE_SCRIPT
         + """
+notch_stage installing_dependencies
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r "$COMFYUI_DIR/requirements.txt" || exit $?
 NOTCH_TARGET="$COMFYUI_DIR/custom_nodes/ComfyUI-Notch"
@@ -145,10 +185,12 @@ fi
 mkdir -p "$NOTCH_TARGET"
 rsync -a --delete --exclude=.git /opt/notch-plugin/ "$NOTCH_TARGET/"
 touch "$NOTCH_TARGET/.runpod-managed"
+notch_stage installing_dependencies
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt || exit $?
 export NOTCH_AUTO_INSTALL=0
 if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
+    notch_stage preparing_files
     python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode prepare || exit $?
     mkdir -p "$COMFYUI_DIR/custom_nodes/hosted_model_cache"
     cp /opt/notch-model-cache.py "$COMFYUI_DIR/custom_nodes/hosted_model_cache/__init__.py" || exit $?
@@ -157,10 +199,14 @@ if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
 fi
 echo "[Notch Runpod] Plugin ready; starting ComfyUI"
 python /opt/notch-park.py &
-python main.py $FIXED_ARGS &
+notch_stage starting_comfy
+(python main.py $FIXED_ARGS || notch_failed) &
 """
     )
     source = startup.decode("utf-8").replace("--port 8188", "--port " + str(port))
+    if source.count("\nsetup_ssh\n") != 1:
+        raise RuntimeError("Expected one SSH startup command")
+    source = STATUS_SCRIPT + source.replace("\nsetup_ssh\n", "\n")
     marker = "python main.py $FIXED_ARGS &"
     if source.count(marker) != 1:
         raise RuntimeError("Expected one ComfyUI startup command")
@@ -204,16 +250,26 @@ def checkout_plugin(checkout, repository, revision, git_env):
         with tempfile.TemporaryDirectory(prefix="notch-checkout-", dir=checkout.parent) as directory:
             stage = Path(directory, "plugin")
             subprocess.run(["git", "init", "-q", str(stage)], check=True)
+            subprocess.run(["git", "-C", str(stage), "remote", "add", "origin", "git@github.com:" + repository + ".git"], check=True)
+            subprocess.run(["git", "-C", str(stage), "config", "remote.origin.promisor", "true"], check=True)
+            subprocess.run(["git", "-C", str(stage), "config", "remote.origin.partialclonefilter", "blob:none"], check=True)
+            subprocess.run(["git", "-C", str(stage), "sparse-checkout", "set", "--no-cone", "--stdin"], input="/*\n!/tests/\n!/cpp/\n", text=True, check=True)
+            attempt_env = git_env.copy()
+            if attempt == 1 and "GIT_SSH_COMMAND" in attempt_env:
+                arguments = shlex.split(attempt_env["GIT_SSH_COMMAND"])
+                arguments = ["Hostname=github.com" if item == "Hostname=ssh.github.com" else item for item in arguments]
+                for index, value in enumerate(arguments[:-1]):
+                    if value == "-p":
+                        arguments[index + 1] = "22"
+                attempt_env["GIT_SSH_COMMAND"] = shlex.join(arguments)
             try:
-                fetch_plugin(stage, repository, revision, git_env)
+                fetch_plugin(stage, repository, revision, attempt_env)
+                run_git(["git", "-C", str(stage), "checkout", "--quiet", "--detach", "FETCH_HEAD"], attempt_env)
             except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
                 if attempt == 2:
                     raise
                 print("[Notch Runpod] Plugin fetch failed; retrying", flush=True)
                 continue
-            subprocess.run(
-                ["git", "-C", str(stage), "checkout", "--quiet", "--detach", "FETCH_HEAD"], check=True
-            )
             actual = subprocess.check_output(["git", "-C", str(stage), "rev-parse", "HEAD"], text=True).strip()
             if re.fullmatch(r"[0-9a-f]{40}", revision) and actual != revision:
                 raise RuntimeError("Plugin revision verification failed")
@@ -224,7 +280,11 @@ def checkout_plugin(checkout, repository, revision, git_env):
 
 
 def fetch_plugin(checkout, repository, revision, git_env):
-    command = ["git", "-C", str(checkout), "fetch", "--quiet", "--depth=1", "git@github.com:" + repository + ".git", revision]
+    command = ["git", "-C", str(checkout), "fetch", "--quiet", "--filter=blob:none", "--depth=1", "origin", revision]
+    run_git(command, git_env)
+
+
+def run_git(command, git_env):
     with subprocess.Popen(command, env=git_env, start_new_session=os.name == "posix") as process:
         try:
             result = process.wait(timeout=60)
@@ -253,4 +313,12 @@ def configure_ssh(path):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        stage_path = Path("/opt/notch-startup-stage")
+        if stage_path.exists():
+            stage = json.loads(stage_path.read_text())["stage"]
+            set_stage(stage, error=True)
+        time.sleep(30)
+        raise

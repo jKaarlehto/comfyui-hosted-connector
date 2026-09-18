@@ -18,6 +18,7 @@ class HealthTests(unittest.TestCase):
         root = Path(self.directory.name)
         self.config = root / "health.json"
         self.marker = root / "restored"
+        self.stage = root / "startup-stage"
         self.marker.touch()
         self.routes = {
             "/system_stats": {"system": {"comfyui_version": "0.36.0"}},
@@ -55,7 +56,7 @@ class HealthTests(unittest.TestCase):
     def check(self, mounted=True):
         self.config.write_text(json.dumps(self.values), encoding="utf-8")
         with patch.object(Path, "is_mount", return_value=mounted):
-            return health.check(self.config, self.marker)
+            return health.check(self.config, self.marker, self.stage)
 
     def test_ready_requires_comfy_plugin_and_restored_mounted_storage(self):
         self.assertEqual(self.check(), {"ready": True, "pod_id": "replacement", "deployment_id": "workspace"})
@@ -91,6 +92,39 @@ class HealthTests(unittest.TestCase):
     def test_external_proxy_is_not_used_for_loopback_health(self):
         with patch.dict("os.environ", {"HTTP_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1", "NO_PROXY": "", "no_proxy": ""}):
             self.assertTrue(self.check()["ready"])
+
+    def test_known_startup_stages_are_reported_before_files_are_ready(self):
+        self.marker.unlink()
+        for stage in health.STARTUP_STAGES:
+            with self.subTest(stage=stage):
+                self.stage.write_text(json.dumps({"stage": stage, "details": "private output"}))
+                self.assertEqual(self.check(), {"ready": False, "stage": stage, "error": False,
+                                                "pod_id": "replacement", "deployment_id": "workspace"})
+
+    def test_stage_failure_is_reported_without_forwarding_logs_or_http_checks(self):
+        self.stage.write_text(json.dumps({"stage": "fetching_plugin", "error": True, "log": "private deploy key"}))
+        with patch.object(health, "get_json", side_effect=AssertionError("Backend should not be checked after failure")):
+            self.assertEqual(self.check(), {"ready": False, "stage": "fetching_plugin", "error": True,
+                                            "pod_id": "replacement", "deployment_id": "workspace"})
+
+    def test_invalid_or_wrong_identity_stage_is_ignored(self):
+        self.marker.unlink()
+        cases = [None, [], {}, {"stage": []}, {"stage": "private deploy key"},
+                 {"stage": "fetching_plugin", "error": "private deploy key"},
+                 {"stage": "fetching_plugin", "pod_id": "another"},
+                 {"stage": "fetching_plugin", "deployment_id": "another"}]
+        for value in cases:
+            with self.subTest(value=value):
+                self.stage.write_text(json.dumps(value))
+                self.assertEqual(self.check(), {"ready": False})
+        self.stage.write_text("{" + " " * 4096)
+        self.assertEqual(self.check(), {"ready": False})
+
+    def test_running_backend_keeps_exact_ready_identity_without_stage_fields(self):
+        self.stage.write_text(json.dumps({"stage": "starting_comfy", "pod_id": "replacement", "deployment_id": "workspace"}))
+        self.assertEqual(self.check(), {"ready": True, "pod_id": "replacement", "deployment_id": "workspace"})
+        self.routes["/system_stats"] = None
+        self.assertEqual(self.check()["stage"], "starting_comfy")
 
 
 if __name__ == "__main__":

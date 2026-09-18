@@ -139,6 +139,36 @@ class GitStartupTests(unittest.TestCase):
         self.assertFalse((self.checkout / ".git/shallow.lock").exists())
         self.assertEqual((self.checkout / "version.txt").read_text(), "main")
 
+    def test_runtime_checkout_excludes_test_media_and_client_sdk(self):
+        for folder in ("tests", "cpp", "web"):
+            (self.source / folder).mkdir()
+            (self.source / folder / "sample.txt").write_text(folder)
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "runtime and development files")
+        bootstrap.checkout_plugin(self.checkout, "test/plugin", "main", self.local_remote_env("git@github.com:test/plugin.git"))
+        self.assertFalse((self.checkout / "tests").exists())
+        self.assertFalse((self.checkout / "cpp").exists())
+        self.assertEqual((self.checkout / "web/sample.txt").read_text(), "web")
+
+    def test_retry_uses_pinned_github_port_22_route(self):
+        env = self.local_remote_env("git@github.com:test/plugin.git")
+        env["GIT_SSH_COMMAND"] = "ssh -p 443 -o Hostname=ssh.github.com -o StrictHostKeyChecking=yes"
+        original = bootstrap.fetch_plugin
+        attempts = []
+
+        def fetch(stage, repository, revision, attempt_env):
+            attempts.append(attempt_env["GIT_SSH_COMMAND"])
+            if len(attempts) == 1:
+                raise subprocess.TimeoutExpired("git", 60)
+            return original(stage, repository, revision, attempt_env)
+
+        with patch.object(bootstrap, "fetch_plugin", side_effect=fetch):
+            bootstrap.checkout_plugin(self.checkout, "test/plugin", "main", env)
+        self.assertIn("-p 443", attempts[0])
+        self.assertIn("-p 22", attempts[1])
+        self.assertIn("Hostname=github.com", attempts[1])
+        self.assertIn("StrictHostKeyChecking=yes", attempts[1])
+
     def test_fetch_timeout_kills_ssh_children_before_returning(self):
         with patch.object(bootstrap.subprocess, "Popen") as popen, patch.object(bootstrap.os, "name", "posix"), patch.object(bootstrap.os, "killpg", create=True) as kill, patch.object(bootstrap.signal, "SIGKILL", 9, create=True):
             process = popen.return_value.__enter__.return_value

@@ -139,7 +139,8 @@ class Provider:
         with (
             patch.object(recovery, "request", side_effect=self.request),
             patch.object(recovery, "graphql", side_effect=self.graphql),
-            patch.object(recovery, "healthy", return_value=self.backend_ready),
+            patch.object(recovery, "health_status", return_value=self.backend_ready if isinstance(self.backend_ready, dict)
+                         else {"ready": self.backend_ready}),
             patch.object(recovery.time, "time", return_value=self.now),
         ):
             return recovery.connection("key", "starter")
@@ -149,6 +150,26 @@ class Provider:
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_startup_stage_uses_fixed_progress_messages(self):
+        p = Provider()
+        p.pods["source"]["status"] = "RUNNING"
+        for stage, messages in recovery.STARTUP_MESSAGES.items():
+            with self.subTest(stage=stage):
+                p.backend_ready = {"ready": False, "stage": stage, "error": False}
+                self.assertEqual(p.connect(), {"state": "starting", "message": messages[0]})
+        self.assertEqual(p.mutations(), [])
+
+    def test_failed_plugin_fetch_stops_wait_without_retiring_source_or_latching_failure(self):
+        p = Provider()
+        p.connect()
+        p.backend_ready = {"ready": False, "stage": "fetching_plugin", "error": True}
+        self.assertEqual(p.connect(), {"state": "unavailable", "message": recovery.STARTUP_MESSAGES["fetching_plugin"][1]})
+        self.assertIn("source", p.pods)
+        self.assertEqual(p.state["phase"], "verifying")
+        p.backend_ready = True
+        self.assertEqual(p.connect()["state"], "ready")
+        self.assertNotIn("source", p.pods)
+
     def test_stopped_pod_adopts_updated_startup_before_resuming(self):
         p = Provider()
         p.start_error = None
@@ -435,6 +456,37 @@ class RecoveryTests(unittest.TestCase):
             {"input": {"action": "connect"}},
             "https://api.runpod.ai/v2",
         )
+
+
+class HealthIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.env = {"NOTCH_DEPLOYMENT_ID": "workspace"}
+        self.identity = {"pod_id": "expected", "deployment_id": "workspace"}
+
+    def test_ready_identity_stays_exact(self):
+        good = {"ready": True, **self.identity}
+        self.assertEqual(recovery.validate_health(good, self.env, "expected"), {"ready": True})
+        for bad in ({"ready": True}, {**good, "pod_id": "other"}, {**good, "deployment_id": "other"},
+                    {**good, "stage": "starting_comfy"}, {**good, "ready": 1}):
+            with self.subTest(bad=bad):
+                self.assertEqual(recovery.validate_health(bad, self.env, "expected"), {"ready": False})
+
+    def test_known_stage_allows_missing_identity_but_rejects_any_mismatch(self):
+        status = {"ready": False, "stage": "fetching_plugin", "error": True}
+        for fields in ({}, self.identity, {"pod_id": "expected"}, {"deployment_id": "workspace"}):
+            with self.subTest(fields=fields):
+                self.assertEqual(recovery.validate_health({**status, **fields}, self.env, "expected"), status)
+        for fields in ({"pod_id": "other"}, {"deployment_id": "other"}):
+            with self.subTest(fields=fields):
+                self.assertEqual(recovery.validate_health({**status, **fields}, self.env, "expected"), {"ready": False})
+
+    def test_untrusted_details_are_never_exposed(self):
+        status = {"ready": False, "stage": "fetching_plugin", "error": False}
+        self.assertEqual(recovery.validate_health({**status, "details": "private key"}, self.env, "expected"), status)
+        for bad in (None, [], {"ready": False, "stage": []}, {"ready": False, "stage": "private key"},
+                    {**status, "error": "private key"}, {**status, "ready": 0}):
+            with self.subTest(bad=bad):
+                self.assertEqual(recovery.validate_health(bad, self.env, "expected"), {"ready": False})
 
 
 class ErrorTests(unittest.TestCase):

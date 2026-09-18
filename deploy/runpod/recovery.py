@@ -24,6 +24,15 @@ FALLBACK_GPUS = [
     "NVIDIA RTX A6000",
     "NVIDIA A40",
 ]
+STARTUP_MESSAGES = {
+    "checking_updates": ("Checking for updates", "Could not check for updates; the owner must check GitHub access"),
+    "fetching_plugin": ("Downloading Notch plugin", "Could not download the Notch plugin; the owner must check GitHub access and the deploy key"),
+    "starting_services": ("Starting connection services", "Could not start connection services; contact the owner"),
+    "updating_comfy": ("Updating ComfyUI", "Could not update ComfyUI; the owner must check GitHub access"),
+    "installing_dependencies": ("Installing ComfyUI dependencies", "Could not install ComfyUI dependencies; contact the owner"),
+    "preparing_files": ("Preparing saved files", "Could not prepare persistent files; the owner must check storage"),
+    "starting_comfy": ("Starting ComfyUI", "ComfyUI failed to start; the owner must check the startup log"),
+}
 
 
 def connection(key, endpoint_id):
@@ -363,8 +372,14 @@ class Recovery:
             return starting("Waiting for SSH")
         if getattr(DEADLINE, "value", float("inf")) - time.monotonic() < 20:
             return starting("Checking ComfyUI readiness on the next connection request")
-        if not healthy(self.env, pod_id, host, int(port)):
-            return starting("Waiting for ComfyUI and persistent files")
+        status = health_status(self.env, pod_id, host, int(port))
+        if not status["ready"]:
+            messages = STARTUP_MESSAGES.get(status.get("stage"))
+            if messages:
+                if status.get("error"):
+                    return {"state": "unavailable", "message": messages[1]}
+                return starting(messages[0])
+            return starting("Waiting for the server's startup status")
         return {
             "state": "ready",
             "host": host,
@@ -374,7 +389,22 @@ class Recovery:
         }
 
 
-def healthy(env, pod_id, host, port):
+def validate_health(result, env, pod_id):
+    pending = {"ready": False}
+    if not isinstance(result, dict):
+        return pending
+    identity = {"pod_id": pod_id, "deployment_id": env["NOTCH_DEPLOYMENT_ID"]}
+    if result.get("ready") is True:
+        return {"ready": True} if result == {"ready": True, **identity} else pending
+    if result.get("ready") is not False or any(name in result and result[name] != value for name, value in identity.items()):
+        return pending
+    stage = result.get("stage")
+    if not isinstance(stage, str) or stage not in STARTUP_MESSAGES or type(result.get("error", False)) is not bool:
+        return pending
+    return {"ready": False, "stage": stage, "error": result.get("error", False)}
+
+
+def health_status(env, pod_id, host, port):
     import paramiko
 
     client = paramiko.SSHClient()
@@ -399,14 +429,10 @@ def healthy(env, pod_id, host, port):
             look_for_keys=False,
         )
         _, output, _ = client.exec_command("health", timeout=8)
-        result = json.loads(output.read(16385))
-        return result == {
-            "ready": True,
-            "pod_id": pod_id,
-            "deployment_id": env["NOTCH_DEPLOYMENT_ID"],
-        }
+        data = output.read(16385)
+        return validate_health(json.loads(data), env, pod_id) if len(data) <= 16384 else {"ready": False}
     except (OSError, ValueError, KeyError, paramiko.SSHException):
-        return False
+        return {"ready": False}
     finally:
         client.close()
 

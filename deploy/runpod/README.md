@@ -87,6 +87,8 @@ Opening the WebUI or leaving an SSH tunnel connected does not prevent idle parki
 
 Every startup resolves `stable` through the official ComfyUI repository's latest-release API and fetches that exact release tag. Draft and prerelease releases are rejected. If the release cannot be resolved, startup fails instead of selecting a development branch. The plugin independently fetches its configured branch, tag or commit on every startup; its default remains `install-startup-requirements`. Logs show the resolved ComfyUI tag and both checked-out commits. Existing setups keep their saved ref; run `runpod.py setup --comfy-ref stable` and reapply the template to switch them.
 
+Plugin deployment uses a partial Git fetch and sparse checkout, excluding test media and the C++ client SDK. SSH starts before update downloads, allowing the connector to report the current startup stage or a failure. Plugin fetches retry using GitHub's pinned SSH endpoints on ports 443 and 22; credentials remain read-only deploy keys.
+
 The base image and its startup script are pinned and checked. This remote deployment uses HTTP transport and skips the plugin's `cuda-python` metapackage when installing its dependencies, preserving the base image's PyTorch-compatible CUDA bindings. The plugin's source requirements are left unchanged and its redundant startup installer is disabled in the deployment. Updates retain the image's pinned PyTorch/CUDA requirements. An incompatible upstream dependency update fails startup instead of silently replacing that stack.
 
 ## Storage

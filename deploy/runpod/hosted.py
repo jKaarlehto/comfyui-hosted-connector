@@ -95,8 +95,8 @@ def starter_source():
 
 
 def starter_code():
-    encoded = base64.b64encode(zlib.compress(starter_source().encode(), 9)).decode()
-    command = "import base64,zlib;exec(zlib.decompress(base64.b64decode(" + repr(encoded) + ")))"
+    encoded = base64.b85encode(zlib.compress(starter_source().encode(), 9)).decode()
+    command = "import base64,zlib;exec(zlib.decompress(base64.b85decode(" + repr(encoded) + ")))"
     return json.dumps({"entrypoint": ["python3", "-u", "-c"], "cmd": [command]})
 
 
