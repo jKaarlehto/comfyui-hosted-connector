@@ -168,6 +168,54 @@ function Open-WorkspaceAccess($Invitation, [string]$Root) {
 }
 
 function Get-WorkspaceBookmark($Access) {
-    $value = @{version = 2; gateway = $Access.gateway; invite_id = $Access.invite_id; token = ''}
+    if ($Access.version -eq 1) {
+        $value = @{version = 3; workspace_id = (Get-WorkspaceHash ('legacy|' + $Access.endpoint + '|' + $Access.key))}
+    } else { $value = @{version = 2; gateway = $Access.gateway; invite_id = $Access.invite_id; token = ''} }
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($value | ConvertTo-Json -Compress)))
+}
+
+function Test-LegacyInvitation($Value) {
+    return (($Value.PSObject.Properties.Name | Sort-Object) -join ',' -ceq 'endpoint,key,ssh_key,version' -and
+        $Value.version -is [int] -and $Value.version -eq 1 -and
+        $Value.endpoint -is [string] -and $Value.endpoint -cmatch '\A[a-z0-9]{8,40}\z' -and
+        $Value.key -is [string] -and $Value.key -cmatch '\A[A-Za-z0-9_-]{20,200}\z' -and
+        $Value.ssh_key -is [string] -and $Value.ssh_key -cmatch '\A-----BEGIN OPENSSH PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]{40,8000}-----END OPENSSH PRIVATE KEY-----\s*\z')
+}
+
+function Open-LegacyWorkspace($Invitation, [string]$Root) {
+    $original = Test-LegacyInvitation $Invitation
+    if ($original) {
+        $localId = Get-WorkspaceHash ('legacy|' + $Invitation.endpoint + '|' + $Invitation.key)
+    } elseif (($Invitation.PSObject.Properties.Name | Sort-Object) -join ',' -ceq 'version,workspace_id' -and
+        $Invitation.version -is [int] -and $Invitation.version -eq 3 -and
+        $Invitation.workspace_id -is [string] -and $Invitation.workspace_id -cmatch '\A[0-9a-f]{64}\z') {
+        $localId = $Invitation.workspace_id
+    } else { throw 'This invitation code is invalid. Ask the owner for a new code.' }
+    $folder = Join-Path $Root 'workspaces'
+    Protect-WorkspaceDirectory $folder
+    $id = Get-WorkspaceHash ('legacy|' + $localId)
+    $path = Join-Path $folder ($id + '.dat')
+    if ([IO.File]::Exists($path + '.lock') -and
+        (([IO.File]::GetAttributes($path + '.lock') -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'The workspace file must not be a link.' }
+    $lock = $null
+    for ($attempt = 0; $attempt -lt 20 -and !$lock; $attempt++) {
+        try { $lock = New-Object IO.FileStream(($path + '.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] { Start-Sleep -Milliseconds 250 }
+    }
+    if (!$lock) { throw 'This workspace is already being opened. Try again shortly.' }
+    try {
+        if ($original) {
+            $value = $Invitation
+            Write-WorkspaceVault $path $value
+        } else {
+            if (![IO.File]::Exists($path)) { throw 'This workspace is not saved on this computer. Open a new invitation from the owner.' }
+            $value = Read-WorkspaceVault $path
+            if (!(Test-LegacyInvitation $value) -or (Get-WorkspaceHash ('legacy|' + $value.endpoint + '|' + $value.key)) -cne $localId) {
+                throw 'The saved workspace credentials are invalid.'
+            }
+        }
+        $descriptor = @{version = 3; workspace_id = $localId; name = ('ComfyUI Notch (' + $value.endpoint + ')')}
+        Write-WorkspaceFile ([IO.Path]::ChangeExtension($path, '.json')) ([Text.Encoding]::UTF8.GetBytes(($descriptor | ConvertTo-Json -Compress)))
+        return $value
+    } finally { $lock.Dispose() }
 }

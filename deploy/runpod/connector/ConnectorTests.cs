@@ -6,6 +6,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -76,6 +77,7 @@ internal static class ConnectorTests
             TestLiveStatus();
             TestEnrollment();
             TestWorkspacesAndForm();
+            TestLegacyMigration();
             using (var rejectedInstall = Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HostedComfyUIConnector.exe"), "--install unexpected")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true }))
             {
@@ -387,6 +389,97 @@ internal static class ConnectorTests
             item.Remove(root);
             Check(Workspace.Load(root).Count == 0 && !File.Exists(Path.Combine(folder, item.Id + ".dat")) && !File.Exists(Path.Combine(folder, item.Id + ".json")));
             Check(File.Exists(Path.Combine(folder, "wrong-name.json")));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    private static void TestLegacyMigration()
+    {
+        string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "legacy-workspace-" + Guid.NewGuid().ToString("N"));
+        var value = new Dictionary<string, object> { { "version", 1 }, { "endpoint", "fixture123456" }, { "key", new String('A', 40) },
+            { "ssh_key", "-----BEGIN OPENSSH PRIVATE KEY-----\n" + new String('A', 80) + "\n-----END OPENSSH PRIVATE KEY-----\n" } };
+        string original = Encode(value);
+        try
+        {
+            Storage.ProtectDirectory(root);
+            string env = Path.Combine(root, ".env");
+            File.WriteAllText(env, "OTHER_SETTING=preserved\nHOSTED_COMFYUI_ACCESS=" + original + "\n");
+            using (var form = new ConnectorForm(root))
+            {
+                form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-32000, -32000); form.ShowInTaskbar = false; form.Opacity = 0;
+                form.Show(); Application.DoEvents();
+                var list = (ListBox)form.Controls.Find("savedWorkspaces", true)[0];
+                Check(list.Items.Count == 1 && form.Controls.Find("connect", true)[0].Enabled);
+                Check(((Workspace)list.SelectedItem).Name.Contains("fixture123456"));
+                using (var image = new Bitmap(form.Width, form.Height))
+                {
+                    form.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                    image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "connector-legacy-preview.png"));
+                }
+                form.Close();
+            }
+            Workspace saved = Workspace.Load(root)[0];
+            Check(Invitation.Version(saved.Bookmark) == 3 && Invitation.SavedBookmark(saved.Bookmark) == saved.Bookmark);
+            Check(Invitation.Identity(original) == Invitation.Identity(saved.Bookmark));
+            Reject(delegate { Invitation.DecodeUri("hosted-comfyui://connect#" + saved.Bookmark); });
+            Check(File.ReadAllText(env).Contains("OTHER_SETTING=preserved") && !File.ReadAllText(env).Contains(original));
+            var bookmark = Invitation.Fields(saved.Bookmark);
+            Check(bookmark.Count == 2 && !bookmark.ContainsKey("key") && !bookmark.ContainsKey("ssh_key"));
+            string path = Path.Combine(root, "workspaces", saved.Id + ".dat");
+            byte[] cipher = File.ReadAllBytes(path);
+            Check(!Encoding.UTF8.GetString(cipher).Contains((string)value["key"]) && !Encoding.UTF8.GetString(cipher).Contains("OPENSSH PRIVATE KEY"));
+            byte[] plain = ProtectedData.Unprotect(cipher, null, DataProtectionScope.CurrentUser);
+            var reopened = ReadJson(Encoding.UTF8.GetString(plain)); Array.Clear(plain, 0, plain.Length);
+            Check((string)reopened["key"] == (string)value["key"] && (string)reopened["ssh_key"] == (string)value["ssh_key"]);
+            var descriptor = ReadJson(File.ReadAllText(Path.ChangeExtension(path, ".json")));
+            Check(descriptor.Count == 3 && !descriptor.ContainsKey("key") && !descriptor.ContainsKey("ssh_key") && !descriptor.ContainsKey("endpoint"));
+            Workspace.ImportLegacy(root);
+            Check(Workspace.Load(root).Count == 1);
+
+            string module = Path.Combine(root, "access.ps1");
+            using (Stream input = typeof(ConnectorTests).Assembly.GetManifestResourceStream("access.ps1"))
+            using (Stream output = File.Create(module)) input.CopyTo(output);
+            string script = Path.Combine(root, "roundtrip.ps1");
+            File.WriteAllText(Path.Combine(root, "bookmark.json"), new JavaScriptSerializer().Serialize(bookmark));
+            File.WriteAllText(script, "$ErrorActionPreference='Stop'\n. (Join-Path $PSScriptRoot 'access.ps1')\n" +
+                "function Invoke-WorkspaceRequest { throw 'Networking is not allowed in this test' }\n" +
+                "$bookmark = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'bookmark.json') -Raw | ConvertFrom-Json\n" +
+                "$access = Open-LegacyWorkspace $bookmark $PSScriptRoot\n" +
+                "if ($access.endpoint -cne 'fixture123456' -or $access.key -cne ('A'*40)) { throw 'Native vault was not readable' }\n" +
+                "$access.endpoint = 'fixture654321'\nOpen-LegacyWorkspace $access $PSScriptRoot | Out-Null\n");
+            using (var process = Process.Start(new ProcessStartInfo(Program.PowerShell, "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Storage.Quote(script))
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true }))
+            {
+                Check(process.WaitForExit(10000));
+                Check(process.ExitCode == 0);
+            }
+            var entries = Workspace.Load(root);
+            Check(entries.Count == 2);
+            Workspace other = entries.Find(item => item.Identity != saved.Identity);
+            byte[] fromScript = ProtectedData.Unprotect(File.ReadAllBytes(Path.Combine(root, "workspaces", other.Id + ".dat")), null, DataProtectionScope.CurrentUser);
+            Check((string)ReadJson(Encoding.UTF8.GetString(fromScript))["endpoint"] == "fixture654321");
+            Array.Clear(fromScript, 0, fromScript.Length);
+            other.Remove(root);
+            Check(File.ReadAllText(env).Contains(saved.Bookmark));
+            saved.Remove(root);
+            Check(!File.ReadAllText(env).Contains("HOSTED_COMFYUI_ACCESS") && File.ReadAllText(env).Contains("OTHER_SETTING=preserved"));
+            using (var empty = new ConnectorForm(root))
+            {
+                empty.StartPosition = FormStartPosition.Manual; empty.Location = new Point(-32000, -32000); empty.ShowInTaskbar = false; empty.Opacity = 0;
+                empty.Show(); Application.DoEvents();
+                Check(((ListBox)empty.Controls.Find("savedWorkspaces", true)[0]).Items.Count == 0 && !empty.Controls.Find("connect", true)[0].Enabled);
+                Check(!empty.Controls.Find("savedWorkspaces", true)[0].Visible && empty.Controls.Find("emptyWorkspaces", true)[0].Visible);
+                using (var image = new Bitmap(empty.Width, empty.Height))
+                {
+                    empty.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size));
+                    image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "connector-empty-preview.png"));
+                }
+                empty.Close();
+            }
+            bookmark["workspace_id"] = "../../invalid";
+            Reject(delegate { Invitation.Normalize(Encode(bookmark)); });
+            bookmark["workspace_id"] = new String('a', 64); bookmark["key"] = "unexpected";
+            Reject(delegate { Invitation.Normalize(Encode(bookmark)); });
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

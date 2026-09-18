@@ -29,6 +29,12 @@ function randomToken() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function currentConnector(version) {
+  if (typeof version !== "string" || !/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(version) || version !== version.trim()) return false;
+  const parts = version.split(".").map(Number);
+  return parts[0] > 1 || (parts[0] === 1 && (parts[1] > 1 || (parts[1] === 1 && parts[2] >= 1)));
+}
+
 function localAddress(value) {
   if (typeof value !== "string" || value !== value.trim() || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/?$/.test(value)) return "";
   try {
@@ -114,7 +120,7 @@ function initializePage() {
   let invitationNextCheck = 0;
   const render = () => {
     const allowed = session || ["legacy", "unused", "redeemed", "saved"].includes(invitationState);
-    const installAllowed = session || ["legacy", "unused"].includes(invitationState);
+    const installAllowed = session || ["legacy", "unused"].includes(invitationState) || (outdated && ["redeemed", "saved"].includes(invitationState));
     const waiting = session && !snapshot && Date.now() - launchedAt < 20000 && !localError;
     const connected = ready && snapshot?.state === "connected" && !localError;
     const busy = waiting || (ready && snapshot?.state === "starting" && !localError);
@@ -150,9 +156,11 @@ function initializePage() {
       revoked: "This invitation's access has been revoked. Ask the owner for a new link.",
       invalid: "This invitation is invalid. Ask the owner for a new link.",
       unavailable: "Could not check this invitation. Try again shortly.",
-      redeemed: ready ? "This invitation has already been accepted. Connect if you accepted it on this computer; otherwise ask the owner for a new link."
+      redeemed: outdated ? "This invitation has already been accepted. Update your existing connector to reopen access saved on this computer."
+        : ready ? "This invitation has already been accepted. Connect if you accepted it on this computer; otherwise ask the owner for a new link."
         : "This invitation has already been accepted. Use Saved workspaces in the connector on the original computer, or ask the owner for a new link.",
-      saved: ready ? "This is a saved workspace. Connect using this computer's saved access."
+      saved: outdated ? "Update your existing connector to open this saved workspace."
+        : ready ? "This is a saved workspace. Connect using this computer's saved access."
         : "This link opens a saved workspace on the original computer. Use its connector, or ask the owner for a new invitation."
     }[invitationState];
     const message = !token
@@ -244,7 +252,7 @@ function initializePage() {
       const nonce = randomToken();
       const value = await read("/status?nonce=" + nonce, controller.signal);
       detected = value && value.app === "hosted-comfyui-connector" && value.protocol === 1 && value.nonce === nonce;
-      capable = detected && value.live_status === 1 && (invitation?.version !== 2 || value.enrollment === 2);
+      capable = detected && currentConnector(value.version) && value.live_status === 1 && (invitation?.version !== 2 || value.enrollment === 2);
       if (capable && requestedSession) {
         const statusNonce = randomToken();
         current = sessionStatus(await read("/session?session=" + requestedSession + "&nonce=" + statusNonce, controller.signal), requestedSession, statusNonce);

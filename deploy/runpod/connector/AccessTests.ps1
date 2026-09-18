@@ -84,6 +84,30 @@ try {
     [IO.File]::WriteAllBytes($vaultPath, [byte[]]@(1, 2, 3))
     Reject-Access { Open-WorkspaceAccess $invitation $testRoot } 'corrupted identity is never silently replaced'
     Assert-Access ($script:requests -eq 2) 'corruption cannot trigger another enrollment'
+    $legacy = [pscustomobject]@{version = 1; endpoint = 'fixture123456'; key = ('A' * 40);
+        ssh_key = ("-----BEGIN OPENSSH PRIVATE KEY-----`n" + ('A' * 80) + "`n-----END OPENSSH PRIVATE KEY-----`n")}
+    Assert-Access (Test-LegacyInvitation $legacy) 'legacy invitation remains valid'
+    $legacyAccess = Open-LegacyWorkspace $legacy $testRoot
+    $legacyBookmark = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-WorkspaceBookmark $legacyAccess))) | ConvertFrom-Json
+    Assert-Access ($legacyBookmark.version -eq 3 -and $legacyBookmark.workspace_id -cmatch '\A[0-9a-f]{64}\z') 'local-only legacy bookmark'
+    Assert-Access (!$legacyBookmark.key -and !$legacyBookmark.ssh_key -and !$legacyBookmark.endpoint) 'legacy bookmark has no credentials'
+    $legacyBase = Get-WorkspaceHash ('legacy|' + $legacyBookmark.workspace_id)
+    $legacyPath = Join-Path $testRoot ('workspaces/' + $legacyBase + '.dat')
+    $legacyDescriptor = [IO.File]::ReadAllText([IO.Path]::ChangeExtension($legacyPath, '.json')) | ConvertFrom-Json
+    Assert-Access ($legacyDescriptor.version -eq 3 -and $legacyDescriptor.name.Contains($legacy.endpoint)) 'legacy saved-workspace descriptor'
+    Assert-Access (!$legacyDescriptor.key -and !$legacyDescriptor.ssh_key -and !$legacyDescriptor.token) 'legacy descriptor public'
+    Assert-Access (![Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($legacyPath)).Contains('OPENSSH PRIVATE KEY')) 'legacy vault encrypted'
+    $legacyAgain = Open-LegacyWorkspace $legacyBookmark $testRoot
+    Assert-Access ($legacyAgain.key -ceq $legacy.key -and $legacyAgain.ssh_key -ceq $legacy.ssh_key) 'legacy bookmark reconnects with preserved credentials'
+    Assert-Access ($script:requests -eq 2) 'legacy import and reconnect are entirely local'
+    Reject-Access { Open-LegacyWorkspace $legacyBookmark (Join-Path $testRoot 'missing-legacy') } 'legacy bookmark cannot grant access on another computer'
+    $invalidLegacy = [pscustomobject]@{version = 3; workspace_id = @($legacyBookmark.workspace_id)}
+    Reject-Access { Open-LegacyWorkspace $invalidLegacy $testRoot } 'legacy id arrays rejected'
+    $invalidLegacy.workspace_id = '../../outside'
+    Reject-Access { Open-LegacyWorkspace $invalidLegacy $testRoot } 'legacy traversal rejected'
+    $legacy.key = ('B' * 40)
+    Write-WorkspaceVault $legacyPath $legacy
+    Reject-Access { Open-LegacyWorkspace $legacyBookmark $testRoot } 'legacy vault identity must match bookmark'
     Write-Host "Passed $checks workspace enrollment checks."
 } finally {
     if ([IO.Directory]::Exists($testRoot)) {

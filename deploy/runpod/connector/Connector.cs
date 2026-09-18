@@ -35,7 +35,9 @@ namespace HostedComfyUI
                 (uri.AbsolutePath != "" && uri.AbsolutePath != "/") || uri.Fragment.Length < 2)
                 throw new ArgumentException("This is not a Hosted ComfyUI invitation link.");
             if (uri.Query.Length != 0) session = uri.Query.Substring("?session=".Length);
-            return Normalize(uri.Fragment.Substring(1));
+            string invitation = Normalize(uri.Fragment.Substring(1));
+            if (Version(invitation) == 3) throw new ArgumentException("Open this saved workspace from the connector.");
+            return invitation;
         }
 
         internal static string Normalize(string encoded)
@@ -50,19 +52,23 @@ namespace HostedComfyUI
                 byte[] data = Convert.FromBase64String(encoded);
                 string json = new UTF8Encoding(false, true).GetString(data);
                 var fields = new JavaScriptSerializer().DeserializeObject(json) as Dictionary<string, object>;
-                if (fields == null || fields.Count != 4 || !fields.ContainsKey("version") || !(fields["version"] is int)) throw new FormatException();
+                if (fields == null || !fields.ContainsKey("version") || !(fields["version"] is int)) throw new FormatException();
                 if ((int)fields["version"] == 1)
                 {
-                    if (!FieldMatches(fields, "endpoint", @"\A[a-z0-9]{8,40}\z") ||
+                    if (fields.Count != 4 || !FieldMatches(fields, "endpoint", @"\A[a-z0-9]{8,40}\z") ||
                         !FieldMatches(fields, "key", @"\A[A-Za-z0-9_-]{20,200}\z") ||
                         !FieldMatches(fields, "ssh_key", @"\A-----BEGIN OPENSSH PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]{40,8000}-----END OPENSSH PRIVATE KEY-----\s*\z")) throw new FormatException();
                 }
                 else if ((int)fields["version"] == 2)
                 {
                     object gateway;
-                    if (!fields.TryGetValue("gateway", out gateway) || !(gateway is string) || !ValidGateway((string)gateway) ||
+                    if (fields.Count != 4 || !fields.TryGetValue("gateway", out gateway) || !(gateway is string) || !ValidGateway((string)gateway) ||
                         !FieldMatches(fields, "invite_id", @"\A[0-9a-f]{32}\z") ||
                         !FieldMatches(fields, "token", @"\A(?:[0-9a-f]{64})?\z")) throw new FormatException();
+                }
+                else if ((int)fields["version"] == 3)
+                {
+                    if (fields.Count != 2 || !FieldMatches(fields, "workspace_id", @"\A[0-9a-f]{64}\z")) throw new FormatException();
                 }
                 else throw new FormatException();
                 return Convert.ToBase64String(data);
@@ -82,15 +88,19 @@ namespace HostedComfyUI
 
         internal static string Identity(string encoded)
         {
-            var fields = new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(Convert.FromBase64String(encoded))) as Dictionary<string, object>;
-            return (int)fields["version"] == 2 ? (string)fields["gateway"] + "|" + (string)fields["invite_id"] : encoded;
+            var fields = Fields(encoded);
+            if ((int)fields["version"] == 2) return (string)fields["gateway"] + "|" + (string)fields["invite_id"];
+            return "legacy|" + ((int)fields["version"] == 3 ? (string)fields["workspace_id"] : Workspace.Hash("legacy|" + fields["endpoint"] + "|" + fields["key"]));
         }
+
+        internal static Dictionary<string, object> Fields(string encoded) { return new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(Convert.FromBase64String(encoded))) as Dictionary<string, object>; }
+        internal static int Version(string encoded) { return (int)Fields(encoded)["version"]; }
 
         internal static string SavedBookmark(string encoded)
         {
             string normalized = Normalize(encoded);
-            var fields = new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(Convert.FromBase64String(normalized))) as Dictionary<string, object>;
-            if ((int)fields["version"] != 2 || (string)fields["token"] != "") throw new ArgumentException("Invalid saved workspace.");
+            var fields = Fields(normalized);
+            if ((int)fields["version"] != 3 && ((int)fields["version"] != 2 || (string)fields["token"] != "")) throw new ArgumentException("Invalid saved workspace.");
             return normalized;
         }
 
@@ -390,6 +400,7 @@ namespace HostedComfyUI
             workspaces.SelectedIndexChanged += delegate { remove.Enabled = workspaces.SelectedItem != null; UpdateConnectButton(); };
             workspaces.DoubleClick += delegate { ConnectSelected(); };
             noWorkspaces.Text = "Accept an invitation to save a workspace on this computer.";
+            noWorkspaces.Name = "emptyWorkspaces";
             noWorkspaces.Dock = DockStyle.Fill; noWorkspaces.ForeColor = summary.ForeColor; noWorkspaces.Padding = new Padding(10); noWorkspaces.BackColor = Color.FromArgb(245, 246, 249);
             savedList.Controls.Add(workspaces); savedList.Controls.Add(noWorkspaces);
             saved.Controls.Add(savedList, 0, 1);
@@ -422,6 +433,9 @@ namespace HostedComfyUI
             heartbeat.Tick += delegate { live.Heartbeat(); };
             heartbeat.Start();
             string savedEnv = Path.Combine(storageRoot, ".env");
+            string migrationError = null;
+            try { Workspace.ImportLegacy(storageRoot); }
+            catch (Exception error) { migrationError = "Could not save the previous invitation on this computer."; Append(error.Message); }
             if (File.Exists(savedEnv))
             {
                 foreach (string line in File.ReadAllLines(savedEnv))
@@ -432,6 +446,7 @@ namespace HostedComfyUI
             SetPhase("disconnected", "Choose a saved workspace, or open an invitation to get started.");
             heading.Text = "Ready to connect";
             Text = "ComfyUI Notch Connector";
+            if (migrationError != null) SetPhase("error", migrationError);
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
             ResumeLayout(true);
@@ -477,6 +492,7 @@ namespace HostedComfyUI
             workspaces.Items.Clear();
             foreach (Workspace value in Workspace.Load(storageRoot)) workspaces.Items.Add(value);
             noWorkspaces.Visible = workspaces.Items.Count == 0;
+            workspaces.Visible = workspaces.Items.Count != 0;
             for (int i = 0; i < workspaces.Items.Count; i++) if (((Workspace)workspaces.Items[i]).Identity == selected) workspaces.SelectedIndex = i;
             if (workspaces.SelectedIndex < 0 && workspaces.Items.Count != 0) workspaces.SelectedIndex = 0;
             SetPhase(phaseState, phaseMessage);
@@ -513,6 +529,11 @@ namespace HostedComfyUI
             if (closing) return;
             Show(); WindowState = FormWindowState.Normal; Activate();
             if (String.IsNullOrEmpty(invitation)) return;
+            if (Invitation.Version(invitation) == 1)
+            {
+                try { invitation = Workspace.SaveLegacy(storageRoot, invitation).Bookmark; RefreshWorkspaces(); }
+                catch (Exception error) { SetPhase("error", "Could not save this workspace on this computer."); Append(error.Message); return; }
+            }
             if (process != null && !process.HasExited)
             {
                 if (activeInvitation != null && Invitation.Identity(activeInvitation) == Invitation.Identity(invitation)) { live.Add(session); if (link.Enabled) OpenBrowser(); return; }
@@ -536,6 +557,7 @@ namespace HostedComfyUI
                 File.WriteAllText(accessPath, activeInvitation, new UTF8Encoding(false));
                 log.Clear(); SetModelVisible(false);
                 SetPhase("starting", "Starting your workspace. Keep this window open while connected.");
+                RefreshWorkspaces();
                 var info = new ProcessStartInfo(Program.PowerShell,
                     "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + Storage.Quote(script) +
                     " -AccessFile " + Storage.Quote(accessPath) + " -EnvFile " + Storage.Quote(Path.Combine(Storage.Root, ".env")) +
@@ -573,7 +595,7 @@ namespace HostedComfyUI
                         if (activeInvitation != null && Invitation.Identity(activeInvitation) == Invitation.Identity(bookmark))
                         {
                             activeInvitation = bookmark;
-                            live.Enrolled();
+                            if (Invitation.Version(bookmark) == 2) live.Enrolled();
                             DeleteAccessFile();
                             RefreshWorkspaces();
                         }

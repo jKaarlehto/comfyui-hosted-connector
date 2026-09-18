@@ -18,7 +18,7 @@ namespace HostedComfyUI
     internal static class Presence
     {
         internal const int Port = 18187;
-        internal const string Version = "1.1.0";
+        internal const string Version = "1.1.1";
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue = "HostedComfyUIConnector";
         private static readonly string Name = @"Local\HostedComfyUI-Presence-" + WindowsIdentity.GetCurrent().User.Value;

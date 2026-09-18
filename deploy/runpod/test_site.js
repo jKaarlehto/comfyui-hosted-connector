@@ -91,7 +91,7 @@ async function poll(test) {
   await flush();
 }
 function answer(url, values = {}) {
-  return { ok: true, json: async () => ({ app: "hosted-comfyui-connector", protocol: 1, version: "1.0.4", live_status: 1,
+  return { ok: true, json: async () => ({ app: "hosted-comfyui-connector", protocol: 1, version: "1.1.1", live_status: 1,
     nonce: new URL(url).searchParams.get("nonce"), session: new URL(url).searchParams.get("session"), ...values }) };
 }
 function state(test, ready) {
@@ -135,7 +135,7 @@ for (const request of test.requests.filter(request => request.url.startsWith("ht
   assert.ok(!JSON.stringify(request).includes(invitation.key));
   assert.ok(!JSON.stringify(request).includes(canonical));
 }
-for (const values of [{ app: "unrelated" }, { protocol: 2 }, { nonce: "stale" }, { protocol: "1" }]) {
+for (const values of [{ app: "unrelated" }, { protocol: 2 }, { nonce: "stale" }, { protocol: "1" }, { version: "1.1.0" }, { version: null }]) {
   test.response = async url => answer(url, values);
   await poll(test);
   state(test, false);
@@ -395,6 +395,9 @@ for (const status of ["expired", "revoked", "invalid", "redeemed"]) {
   await poll(checked);
   assert.equal(checked.elements.get("connect").hidden, status !== "redeemed");
   assert.match(checked.elements.get("status").textContent, status === "redeemed" ? /already been accepted/ : new RegExp(status));
+  checked.response = async url => answer(url, { version: "1.1.0", enrollment: 2 });
+  await poll(checked);
+  assert.equal(checked.elements.get("download").hidden, status !== "redeemed", "Only redeemed access permits an existing connector update");
 }
 const savedPage = page("#" + encodeInvite(savedBookmark));
 await flush();

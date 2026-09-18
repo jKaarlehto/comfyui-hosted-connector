@@ -185,13 +185,9 @@ try {
     $access = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
     if ($access.version -eq 2) {
         $access = Open-WorkspaceAccess $access ([IO.Path]::GetDirectoryName($saved))
-        $encoded = Get-WorkspaceBookmark $access
-        if ($ConnectorMode) { Write-Output "HOSTED_COMFYUI_SAVED=$encoded" }
-    } elseif ($access.version -ne 1 -or $access.endpoint -notmatch '^[a-z0-9]{8,40}$' -or
-        $access.key -notmatch '^[A-Za-z0-9_-]{20,200}$' -or
-        $access.ssh_key -notmatch '^-----BEGIN OPENSSH PRIVATE KEY-----') {
-        throw 'This invitation code is invalid. Ask the owner for a new code.'
-    }
+    } else { $access = Open-LegacyWorkspace $access ([IO.Path]::GetDirectoryName($saved)) }
+    $encoded = Get-WorkspaceBookmark $access
+    if ($ConnectorMode) { Write-Output "HOSTED_COMFYUI_SAVED=$encoded" }
     if (!(Test-Path -LiteralPath $saved)) { New-Item -ItemType File -Path $saved | Out-Null }
     $permissions = New-Object Security.AccessControl.FileSecurity
     $permissions.SetAccessRuleProtection($true, $false)
