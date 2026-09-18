@@ -10,6 +10,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
 namespace HostedComfyUI
@@ -17,7 +18,7 @@ namespace HostedComfyUI
     internal static class Presence
     {
         internal const int Port = 18187;
-        internal const string Version = "1.0.3";
+        internal const string Version = "1.0.4";
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue = "HostedComfyUIConnector";
         private static readonly string Name = @"Local\HostedComfyUI-Presence-" + WindowsIdentity.GetCurrent().User.Value;
@@ -148,7 +149,8 @@ namespace HostedComfyUI
             return 0;
         }
 
-        internal static void Listen(TcpListener listener, string origin, WaitHandle stop, EventWaitHandle ready, Func<bool> installed)
+        internal static void Listen(TcpListener listener, string origin, WaitHandle stop, EventWaitHandle ready, Func<bool> installed,
+            Func<string, Dictionary<string, object>> sessionReader = null)
         {
             var clients = new List<TcpClient>();
             var slots = new Semaphore(4, 4);
@@ -170,7 +172,7 @@ namespace HostedComfyUI
                     lock (clients) clients.Add(client);
                     ThreadPool.QueueUserWorkItem(delegate
                     {
-                        try { Handle(client, origin, installed); }
+                        try { Handle(client, origin, installed, sessionReader); }
                         catch (IOException) { }
                         catch (SocketException) { }
                         catch (ObjectDisposedException) { }
@@ -187,7 +189,8 @@ namespace HostedComfyUI
             }
         }
 
-        private static void Handle(TcpClient client, string origin, Func<bool> installed)
+        private static void Handle(TcpClient client, string origin, Func<bool> installed,
+            Func<string, Dictionary<string, object>> sessionReader)
         {
             using (NetworkStream stream = client.GetStream())
             {
@@ -204,14 +207,15 @@ namespace HostedComfyUI
                     string request = Encoding.ASCII.GetString(data, 0, count);
                     if (request.IndexOf("\r\n\r\n", StringComparison.Ordinal) < 0) continue;
                     for (int i = 0; i < count; i++) if (data[i] >= 128) return;
-                    byte[] response = Encoding.ASCII.GetBytes(Response(request, origin, installed()));
+                    byte[] response = Encoding.UTF8.GetBytes(Response(request, origin, installed(), sessionReader));
                     stream.Write(response, 0, response.Length);
                     return;
                 }
             }
         }
 
-        internal static string Response(string request, string origin, bool installed)
+        internal static string Response(string request, string origin, bool installed,
+            Func<string, Dictionary<string, object>> sessionReader = null)
         {
             if (request == null || request.Length > 8192 || !request.EndsWith("\r\n\r\n", StringComparison.Ordinal)) return Error(400);
             string[] lines = request.Substring(0, request.Length - 4).Split(new[] { "\r\n" }, StringSplitOptions.None);
@@ -235,7 +239,8 @@ namespace HostedComfyUI
                 headers.ContainsKey("Proxy-Authorization") || headers.ContainsKey("Cookie") ||
                 (headers.TryGetValue("Content-Length", out length) && length != "0")) return Error(400);
             Match target = Regex.Match(first[1], @"\A/status\?nonce=([0-9a-f]{32})\z");
-            if (!target.Success) return Error(404);
+            Match session = Regex.Match(first[1], @"\A/session\?session=([0-9a-f]{32})&nonce=([0-9a-f]{32})\z");
+            if (!target.Success && !session.Success) return Error(404);
             if (first[0] != "GET" && first[0] != "OPTIONS") return Error(405);
             if (!installed) return Error(404);
             string cors = "Access-Control-Allow-Origin: " + origin + "\r\nVary: Origin\r\n";
@@ -247,13 +252,23 @@ namespace HostedComfyUI
                     (headers.TryGetValue("Access-Control-Request-Private-Network", out privateNetwork) && privateNetwork != "true")) return Error(403);
                 return "HTTP/1.1 204 No Content\r\n" + cors + "Access-Control-Allow-Methods: GET\r\nAccess-Control-Allow-Private-Network: true\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             }
-            string body = "{\"app\":\"hosted-comfyui-connector\",\"protocol\":1,\"version\":\"" + Version + "\",\"nonce\":\"" + target.Groups[1].Value + "\"}";
-            return "HTTP/1.1 200 OK\r\n" + cors + "Content-Type: application/json\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: " + Encoding.ASCII.GetByteCount(body) + "\r\nConnection: close\r\n\r\n" + body;
+            string body;
+            if (session.Success)
+            {
+                Dictionary<string, object> status = sessionReader == null
+                    ? LiveStatus.Read(Storage.Root, session.Groups[1].Value) : sessionReader(session.Groups[1].Value);
+                if (status == null) return Error(404, cors);
+                status["app"] = "hosted-comfyui-connector"; status["protocol"] = 1;
+                status["nonce"] = session.Groups[2].Value; status["session"] = session.Groups[1].Value;
+                body = new JavaScriptSerializer().Serialize(status);
+            }
+            else body = "{\"app\":\"hosted-comfyui-connector\",\"protocol\":1,\"version\":\"" + Version + "\",\"live_status\":1,\"nonce\":\"" + target.Groups[1].Value + "\"}";
+            return "HTTP/1.1 200 OK\r\n" + cors + "Content-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: " + Encoding.UTF8.GetByteCount(body) + "\r\nConnection: close\r\n\r\n" + body;
         }
 
-        private static string Error(int status)
+        private static string Error(int status, string cors = "")
         {
-            return "HTTP/1.1 " + status + " Rejected\r\nCache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            return "HTTP/1.1 " + status + " Rejected\r\n" + cors + "Cache-Control: no-store\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         }
     }
 }

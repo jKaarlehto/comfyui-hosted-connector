@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-connector-page="2">
+<html lang="en" data-connector-page="3">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,8 +16,18 @@
     <div class="actions">
       <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download and install</a>
       <button id="connect" class="button primary" type="button" hidden disabled>Connect</button>
+      <a id="open" class="button primary" target="_blank" rel="noopener noreferrer" hidden>Open ComfyUI</a>
     </div>
     <p id="status" class="note" role="status" aria-live="polite">Install the connector to continue. Allow local access if your browser asks.</p>
+    <div id="endpoint" class="endpoint" hidden>
+      <span class="note">Local address for your browser and Notch</span>
+      <div class="address-row"><code id="address"></code><button id="copy" class="copy" type="button">Copy address</button></div>
+    </div>
+    <div id="model" class="model" hidden>
+      <p id="model-status" class="note" role="status" aria-live="polite"></p>
+      <p id="model-file" class="filename"></p>
+      <progress id="model-progress" max="100" aria-label="Model download progress"></progress>
+    </div>
     <ol id="install-guide" hidden>
       <li>Open <strong>HostedComfyUIConnector.exe</strong> from your browser's downloads menu, usually near the upper right.</li>
       <li>Confirm installation for your Windows account.</li>

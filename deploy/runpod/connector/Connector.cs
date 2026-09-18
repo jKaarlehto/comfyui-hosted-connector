@@ -21,12 +21,20 @@ namespace HostedComfyUI
     {
         internal static string DecodeUri(string value)
         {
+            string session;
+            return DecodeUri(value, out session);
+        }
+
+        internal static string DecodeUri(string value, out string session)
+        {
+            session = "";
             Uri uri;
             if (value == null || value.Length > 16000 || !Uri.TryCreate(value, UriKind.Absolute, out uri) ||
                 uri.Scheme != "hosted-comfyui" || uri.Host != "connect" || uri.Port != -1 ||
-                uri.UserInfo.Length != 0 || uri.Query.Length != 0 ||
+                uri.UserInfo.Length != 0 || (uri.Query.Length != 0 && !Regex.IsMatch(uri.Query, @"\A\?session=[0-9a-f]{32}\z")) ||
                 (uri.AbsolutePath != "" && uri.AbsolutePath != "/") || uri.Fragment.Length < 2)
                 throw new ArgumentException("This is not a Hosted ComfyUI invitation link.");
+            if (uri.Query.Length != 0) session = uri.Query.Substring("?session=".Length);
             return Normalize(uri.Fragment.Substring(1));
         }
 
@@ -278,6 +286,8 @@ namespace HostedComfyUI
         private readonly Panel modelPanel = new Panel();
         private readonly Label modelStatus = new Label();
         private readonly ProgressBar modelProgress = new ProgressBar();
+        private readonly LiveStatus live = new LiveStatus(Storage.Root);
+        private readonly System.Windows.Forms.Timer heartbeat = new System.Windows.Forms.Timer();
         private Process process;
         private ChildJob job;
         private string activeInvitation;
@@ -307,6 +317,9 @@ namespace HostedComfyUI
             modelProgress.Dock = DockStyle.Bottom; modelProgress.Height = 16;
             modelPanel.Controls.Add(modelStatus); modelPanel.Controls.Add(modelProgress);
             Controls.Add(log); Controls.Add(modelPanel); Controls.Add(footer);
+            heartbeat.Interval = 2000;
+            heartbeat.Tick += delegate { live.Heartbeat(); };
+            heartbeat.Start();
             string saved = Path.Combine(Storage.Root, ".env");
             if (File.Exists(saved))
             {
@@ -316,26 +329,26 @@ namespace HostedComfyUI
             }
         }
 
-        internal void Accept(string invitation)
+        internal void Accept(string invitation, string session)
         {
             if (closing) return;
             Show(); WindowState = FormWindowState.Normal; Activate();
             if (String.IsNullOrEmpty(invitation)) return;
             if (process != null && !process.HasExited)
             {
-                if (activeInvitation == invitation) { if (link.Enabled) OpenBrowser(); return; }
+                if (activeInvitation == invitation) { live.Add(session); if (link.Enabled) OpenBrowser(); return; }
                 if (MessageBox.Show(this, "Replace the current connection with this invitation?", Text,
                     MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-                Stop();
             }
-            Connect(invitation);
+            Connect(invitation, session);
         }
 
-        private void Connect(string invitation)
+        private void Connect(string invitation, string session = "")
         {
             try
             {
                 Stop();
+                live.Start(session, activeInvitation != invitation);
                 activeInvitation = Invitation.Normalize(invitation);
                 string script = Storage.ExtractLauncher();
                 accessPath = Path.Combine(Storage.Root, "invitation-" + Guid.NewGuid().ToString("N"));
@@ -353,11 +366,11 @@ namespace HostedComfyUI
                 process = new Process { StartInfo = info, EnableRaisingEvents = true };
                 process.OutputDataReceived += Output;
                 process.ErrorDataReceived += Output;
-                process.Exited += delegate(object sender, EventArgs args) { Post(delegate { if (!closing && Object.ReferenceEquals(sender, process)) { link.Enabled = false; reconnect.Enabled = true; modelPanel.Visible = false; Text = "Hosted ComfyUI - Disconnected"; Append("Connection ended. Click Reconnect to try again."); } }); };
+                process.Exited += delegate(object sender, EventArgs args) { Post(delegate { if (!closing && Object.ReferenceEquals(sender, process)) { link.Enabled = false; reconnect.Enabled = true; modelPanel.Visible = false; Text = "Hosted ComfyUI - Disconnected"; live.Ended(); Append("Connection ended. Click Reconnect to try again."); } }); };
                 process.Start(); job.Add(process);
                 process.BeginOutputReadLine(); process.BeginErrorReadLine();
             }
-            catch (Exception error) { Stop(); Append("Could not connect: " + error.Message); reconnect.Enabled = activeInvitation != null; }
+            catch (Exception error) { Stop(); live.Set("error", ""); Append("Could not connect: " + error.Message); reconnect.Enabled = activeInvitation != null; }
         }
 
         private void Output(object sender, DataReceivedEventArgs args)
@@ -368,7 +381,9 @@ namespace HostedComfyUI
                 if (!Object.ReferenceEquals(sender, process)) return;
                 if (args.Data == "HOSTED_COMFYUI_READY=" + LocalUrl)
                 {
+                    if (process.HasExited) return;
                     link.Enabled = true; Text = "Hosted ComfyUI - Connected";
+                    live.Set("connected", "Connected");
                     DeleteAccessFile(); OpenBrowser();
                 }
                 else if (args.Data.StartsWith("HOSTED_COMFYUI_STORAGE=", StringComparison.Ordinal))
@@ -382,9 +397,10 @@ namespace HostedComfyUI
                         modelProgress.Style = value.Percent < 0 || value.Phase == "verifying"
                             ? ProgressBarStyle.Marquee : ProgressBarStyle.Continuous;
                         modelProgress.Value = Math.Max(0, value.Percent);
+                        live.SetModel(value);
                     }
                 }
-                else Append(args.Data);
+                else { live.Observe(args.Data); Append(args.Data); }
             });
         }
 
@@ -394,6 +410,7 @@ namespace HostedComfyUI
         private void DeleteAccessFile() { if (accessPath != null && File.Exists(accessPath)) File.Delete(accessPath); accessPath = null; }
         private void Stop()
         {
+            live.Ended();
             if (process != null)
             {
                 if (!process.HasExited && stopPath != null) { File.WriteAllText(stopPath, ""); process.WaitForExit(3000); }
@@ -418,7 +435,7 @@ namespace HostedComfyUI
             stopPath = null;
             sessionPath = null;
         }
-        protected override void OnFormClosing(FormClosingEventArgs args) { closing = true; Stop(); base.OnFormClosing(args); }
+        protected override void OnFormClosing(FormClosingEventArgs args) { closing = true; heartbeat.Stop(); heartbeat.Dispose(); Stop(); base.OnFormClosing(args); }
     }
 
     internal static class Program
@@ -468,7 +485,8 @@ namespace HostedComfyUI
                     Installer.Remove(); return;
                 }
                 if (args.Length > 1) throw new ArgumentException("Open one invitation link at a time.");
-                string invitation = args.Length == 1 ? Invitation.DecodeUri(args[0]) : "";
+                string session = "";
+                string invitation = args.Length == 1 ? Invitation.DecodeUri(args[0], out session) : "";
                 bool created;
                 using (var mutex = new Mutex(true, @"Local\" + name, out created))
                 {
@@ -484,7 +502,7 @@ namespace HostedComfyUI
                         using (var client = new NamedPipeClientStream(".", name, PipeDirection.Out))
                         {
                             client.Connect(5000);
-                            using (var writer = new StreamWriter(client)) writer.WriteLine(invitation);
+                            using (var writer = new StreamWriter(client)) writer.WriteLine(session + "\t" + invitation);
                         }
                         return;
                     }
@@ -492,7 +510,7 @@ namespace HostedComfyUI
                     var form = new ConnectorForm();
                     var thread = new Thread(delegate() { Listen(name, form); });
                     thread.IsBackground = true;
-                    form.Shown += delegate { thread.Start(); form.Accept(invitation); };
+                    form.Shown += delegate { thread.Start(); form.Accept(invitation, session); };
                     Application.Run(form);
                     mutex.ReleaseMutex();
                 }
@@ -517,10 +535,12 @@ namespace HostedComfyUI
                         {
                             var message = new StringBuilder();
                             int value;
-                            while (message.Length <= 15000 && (value = reader.Read()) >= 0 && value != '\n') message.Append((char)value);
-                            string invitation = message.ToString().TrimEnd('\r');
+                            while (message.Length <= 15100 && (value = reader.Read()) >= 0 && value != '\n') message.Append((char)value);
+                            string[] parts = message.ToString().TrimEnd('\r').Split('\t');
+                            if (parts.Length != 2 || (parts[0].Length != 0 && !LiveStatus.ValidSession(parts[0]))) continue;
+                            string invitation = parts[1];
                             if (invitation.Length != 0) invitation = Invitation.Normalize(invitation);
-                            form.BeginInvoke(new Action(delegate { form.Accept(invitation); }));
+                            form.BeginInvoke(new Action(delegate { form.Accept(invitation, parts[0]); }));
                         }
                     }
                 }

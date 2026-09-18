@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$SiteUrl = '',
-    [string]$Version = '1.0.3.0',
+    [string]$Version = '1.0.4.0',
     [string]$CertificateThumbprint = '',
     [string]$Publisher = 'CN=ComfyUI-Notch',
     [switch]$Package,
@@ -23,7 +23,7 @@ $siteFile = Join-Path $output 'site.txt'
 [IO.File]::WriteAllText($siteFile, $SiteUrl.TrimEnd('/'), (New-Object Text.UTF8Encoding($false)))
 $launcher = Join-Path (Split-Path $PSScriptRoot -Parent) 'start_hosted_comfyui.ps1'
 $exe = Join-Path $output 'HostedComfyUIConnector.exe'
-$sources = @((Join-Path $PSScriptRoot 'Connector.cs'), (Join-Path $PSScriptRoot 'Presence.cs'))
+$sources = @((Join-Path $PSScriptRoot 'Connector.cs'), (Join-Path $PSScriptRoot 'Presence.cs'), (Join-Path $PSScriptRoot 'LiveStatus.cs'))
 $compilerArgs = @('/nologo', '/optimize+', '/platform:x64', '/reference:System.dll', '/reference:System.Core.dll',
     '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll',
     "/resource:$launcher,launcher.ps1", "/resource:$siteFile,site.txt")

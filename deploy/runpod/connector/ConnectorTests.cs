@@ -36,6 +36,13 @@ internal static class ConnectorTests
             string urlEncoded = encoded.TrimEnd('=').Replace('+', '-').Replace('/', '_');
             Check(Invitation.DecodeUri("hosted-comfyui://connect#" + urlEncoded) == encoded);
             Check(Invitation.DecodeUri("hosted-comfyui://connect/#" + encoded) == encoded);
+            string session;
+            string token = new String('a', 32);
+            Check(Invitation.DecodeUri("hosted-comfyui://connect?session=" + token + "#" + urlEncoded, out session) == encoded && session == token);
+            Check(Invitation.DecodeUri("hosted-comfyui://connect#" + encoded, out session) == encoded && session == "");
+            foreach (string query in new[] { "session=short", "session=" + token.ToUpperInvariant(), "session=" + token + "&session=" + token,
+                "session=" + token + "&action=start", "nonce=" + token, "session=" + token + "%0a" })
+                Reject(delegate { Invitation.DecodeUri("hosted-comfyui://connect?" + query + "#" + encoded); });
             foreach (string prefix in new [] {"https://connect#", "hosted-comfyui://run#", "hosted-comfyui://user@connect#", "hosted-comfyui://connect:8188#", "hosted-comfyui://connect/run#", "hosted-comfyui://connect?a=b#"})
                 Reject(delegate { Invitation.DecodeUri(prefix + encoded); });
             Reject(delegate { Invitation.DecodeUri("hosted-comfyui://connect"); });
@@ -62,6 +69,7 @@ internal static class ConnectorTests
             Reject(delegate { Storage.Quote("bad\"path"); });
             TestPresence();
             TestModelProgress();
+            TestLiveStatus();
             using (var rejectedInstall = Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HostedComfyUIConnector.exe"), "--install unexpected")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true }))
             {
@@ -160,7 +168,7 @@ internal static class ConnectorTests
         Check(!response.Contains("Access-Control-Allow-Credentials"));
         Check(response.Contains("Cache-Control: no-store\r\n"));
         var fields = new JavaScriptSerializer().DeserializeObject(response.Substring(response.IndexOf("\r\n\r\n") + 4)) as Dictionary<string, object>;
-        Check(fields.Count == 4 && (string)fields["app"] == "hosted-comfyui-connector" && (int)fields["protocol"] == 1 &&
+        Check(fields.Count == 5 && (int)fields["live_status"] == 1 && (string)fields["app"] == "hosted-comfyui-connector" && (int)fields["protocol"] == 1 &&
             (string)fields["version"] == Presence.Version && (string)fields["nonce"] == nonce);
         Check(Presence.Response(request, origin, false).StartsWith("HTTP/1.1 404"));
         Check(Presence.Response(request, null, true).StartsWith("HTTP/1.1 403"));
@@ -230,6 +238,151 @@ internal static class ConnectorTests
                 Check(failure == null);
             }
             finally { stop.Set(); thread.Join(3000); }
+        }
+    }
+
+    private static Dictionary<string, object> ReadJson(string text)
+    {
+        return (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(text);
+    }
+
+    private static void TestLiveStatus()
+    {
+        string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "live-status-" + Guid.NewGuid().ToString("N"));
+        string first = new String('a', 32), second = new String('b', 32), third = new String('c', 32);
+        try
+        {
+            var live = new LiveStatus(root);
+            Check(LiveStatus.Read(root, first) == null && LiveStatus.Read(root, "../x") == null);
+            live.Start(first, false);
+            Check((string)LiveStatus.Read(root, first)["state"] == "starting");
+            live.Observe("[12:34:56] Downloading Notch plugin");
+            Check((string)LiveStatus.Read(root, first)["message"] == "Downloading Notch plugin");
+            live.Observe("[12:34:56] private-key-secret");
+            Check((string)LiveStatus.Read(root, first)["message"] == "Downloading Notch plugin");
+            live.Add(second);
+            live.Set("connected", "secret address");
+            var status = LiveStatus.Read(root, first);
+            Check(status.Count == 3 && (string)status["message"] == "Connected" && (string)status["address"] == LiveStatus.Address);
+            Check((string)LiveStatus.Read(root, second)["state"] == "connected");
+            var model = new Dictionary<string, object> { { "phase", "downloading" }, { "filename", "models/checkpoints/\u6a21\u578b-\u00e4.safetensors" },
+                { "completed_bytes", 5368709120L }, { "total_bytes", 10737418240L } };
+            ModelProgress progress;
+            Check(ModelProgress.TryDecode(Encode(model), out progress));
+            live.SetModel(progress);
+            var snapshotModel = (Dictionary<string, object>)LiveStatus.Read(root, first)["model"];
+            Check((string)snapshotModel["filename"] == (string)model["filename"] && (long)snapshotModel["completed_bytes"] == 5368709120L);
+            TestSessionHttp(root, first, model);
+            model["phase"] = "error"; model["error"] = "private-key-secret";
+            Check(ModelProgress.TryDecode(Encode(model), out progress));
+            live.SetModel(progress);
+            Check(!new JavaScriptSerializer().Serialize(LiveStatus.Read(root, first)).Contains("private-key-secret"));
+            Check((string)((Dictionary<string, object>)LiveStatus.Read(root, first)["model"])["error"] == "Model download failed. See ComfyUI for details.");
+            model["phase"] = "idle";
+            Check(ModelProgress.TryDecode(Encode(model), out progress));
+            live.SetModel(progress);
+            Check(!LiveStatus.Read(root, first).ContainsKey("model"));
+
+            live.Observe("Connection failed: private-key-secret");
+            live.Ended();
+            Check((string)LiveStatus.Read(root, first)["state"] == "error" && !(string.IsNullOrEmpty((string)LiveStatus.Read(root, first)["message"])));
+            Check(!new JavaScriptSerializer().Serialize(LiveStatus.Read(root, first)).Contains("private-key-secret"));
+            live.Start(first, false);
+            Check((string)LiveStatus.Read(root, second)["state"] == "starting");
+            live.Set("connected", "");
+            live.Ended();
+            live.Start(third, true);
+            live.Set("connected", "");
+            Check((string)LiveStatus.Read(root, first)["state"] == "disconnected" && (string)LiveStatus.Read(root, second)["state"] == "disconnected");
+            Check((string)LiveStatus.Read(root, third)["state"] == "connected");
+
+            string path = Path.Combine(root, "page-sessions", third + ".json");
+            string valid = File.ReadAllText(path);
+            var record = ReadJson(valid);
+            record["process_start"] = (long)record["process_start"] + 1;
+            WriteJson(path, record);
+            Check((string)LiveStatus.Read(root, third)["state"] == "disconnected" && (string)LiveStatus.Read(root, third)["address"] == "");
+            record = ReadJson(valid); record["process_id"] = Int32.MaxValue;
+            WriteJson(path, record);
+            Check((string)LiveStatus.Read(root, third)["state"] == "disconnected");
+            record = ReadJson(valid); record["updated_at"] = DateTime.UtcNow.AddSeconds(-16).Ticks;
+            WriteJson(path, record);
+            Check((string)LiveStatus.Read(root, third)["state"] == "disconnected");
+            record["updated_at"] = DateTime.UtcNow.AddMinutes(-31).Ticks;
+            WriteJson(path, record);
+            Check(LiveStatus.Read(root, third) == null);
+            record["updated_at"] = DateTime.UtcNow.AddMinutes(2).Ticks;
+            WriteJson(path, record);
+            Check(LiveStatus.Read(root, third) == null);
+            File.WriteAllText(path, "{broken");
+            Check(LiveStatus.Read(root, third) == null);
+            File.WriteAllText(path, new String('a', 16385));
+            Check(LiveStatus.Read(root, third) == null);
+            live.Heartbeat();
+            Check((string)LiveStatus.Read(root, third)["state"] == "connected");
+
+            Exception failure = null;
+            var writer = new Thread(delegate() { try { for (int i = 0; i < 20; i++) live.Heartbeat(); } catch (Exception error) { failure = error; } });
+            writer.Start();
+            for (int i = 0; i < 30; i++) Check((string)LiveStatus.Read(root, third)["state"] == "connected");
+            Check(writer.Join(5000) && failure == null);
+            live.Clear();
+            Check((string)LiveStatus.Read(root, third)["state"] == "disconnected");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    private static void WriteJson(string path, Dictionary<string, object> value)
+    {
+        File.WriteAllText(path, new JavaScriptSerializer().Serialize(value));
+    }
+
+    private static void TestSessionHttp(string root, string session, Dictionary<string, object> model)
+    {
+        const string origin = "https://jkaarlehto.github.io";
+        string nonce = new String('d', 32);
+        string request = "GET /session?session=" + session + "&nonce=" + nonce + " HTTP/1.1\r\nHost: 127.0.0.1:18187\r\nOrigin: " + origin + "\r\n\r\n";
+        Func<string, Dictionary<string, object>> reader = delegate(string token) { return LiveStatus.Read(root, token); };
+        string preflight = request.Replace("GET ", "OPTIONS ").Replace("\r\n\r\n", "\r\nAccess-Control-Request-Method: GET\r\nAccess-Control-Request-Private-Network: true\r\n\r\n");
+        Check(Presence.Response(preflight, origin, true, reader).StartsWith("HTTP/1.1 204"));
+        foreach (string invalid in new[] { request.Replace(origin, "https://evil.example"), request.Replace("127.0.0.1:18187", "evil.example:18187"),
+            request.Replace("GET ", "POST "), request.Replace(session, session.ToUpperInvariant()), request.Replace("&nonce=", "&session=" + session + "&nonce="),
+            request.Replace(nonce, nonce + "&key=secret"), request.Replace("\r\n\r\n", "\r\nCookie: secret\r\n\r\n") })
+        {
+            string rejected = Presence.Response(invalid, origin, true, reader);
+            Check(rejected.StartsWith("HTTP/1.1 4") && !rejected.Contains("Access-Control-Allow-Origin") && !rejected.Contains("secret"));
+        }
+        string unknown = Presence.Response(request.Replace(session, new String('e', 32)), origin, true, reader);
+        Check(unknown.StartsWith("HTTP/1.1 404") && unknown.Contains("Access-Control-Allow-Origin: " + origin));
+        using (var stop = new ManualResetEvent(false))
+        using (var ready = new ManualResetEvent(false))
+        {
+            var listener = new TcpListener(IPAddress.Loopback, 0);
+            Exception failure = null;
+            var thread = new Thread(delegate()
+            {
+                try { Presence.Listen(listener, origin, stop, ready, delegate { return true; }, reader); }
+                catch (Exception error) { failure = error; }
+            });
+            thread.Start();
+            try
+            {
+                Check(ready.WaitOne(3000));
+                int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+                string response = Probe(port, request);
+                Check(response.StartsWith("HTTP/1.1 200"));
+                string body = response.Substring(response.IndexOf("\r\n\r\n") + 4);
+                Check(response.Contains("Content-Length: " + Encoding.UTF8.GetByteCount(body) + "\r\n"));
+                var value = ReadJson(body);
+                Check(value.Count == 8 && (string)value["app"] == "hosted-comfyui-connector" && (int)value["protocol"] == 1 &&
+                    (string)value["nonce"] == nonce && (string)value["session"] == session && (string)value["state"] == "connected");
+                Check((string)((Dictionary<string, object>)value["model"])["filename"] == (string)model["filename"]);
+                Check(!body.Contains("process_id") && !body.Contains("process_start") && !body.Contains("ssh_key"));
+                Check(Probe(port, preflight).StartsWith("HTTP/1.1 204"));
+                Check(Probe(port, request.Replace(session, new String('e', 32))).StartsWith("HTTP/1.1 404"));
+                Check(Probe(port, request.Replace(origin, "https://evil.example")).StartsWith("HTTP/1.1 403"));
+            }
+            finally { stop.Set(); Check(thread.Join(3000) && failure == null); }
         }
     }
 
