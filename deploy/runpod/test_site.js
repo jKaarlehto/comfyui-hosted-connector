@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { createHash } from "node:crypto";
 
 const source = fs.readFileSync(new URL("./site/connect.js", import.meta.url), "utf8");
 const html = fs.readFileSync(new URL("./site/index.html", import.meta.url), "utf8");
@@ -27,7 +28,7 @@ for (const invalid of [
   assert.throws(() => invitationToken("#" + Buffer.from(JSON.stringify({ ...invitation, ...invalid })).toString("base64url")));
 }
 
-function page(fragment = "#" + canonical, markup = html, query = "") {
+function page(fragment = "#" + canonical, markup = html, query = "", invitationState = "unused") {
   const elements = new Map();
   for (const match of markup.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)) {
     const tag = match[0];
@@ -53,6 +54,7 @@ function page(fragment = "#" + canonical, markup = html, query = "") {
     elements, requests, events, documentEvents, timers, navigations, redirects, replacements,
     now: 100000, clipboard: [],
     response: async () => { throw new Error("No connector"); },
+    invitationResponse: async () => ({ ok: true, json: async () => ({ state: invitationState }) }),
     release: { ok: true, json: async () => ({ installerAvailable: true }) }
   };
   const document = {
@@ -65,14 +67,16 @@ function page(fragment = "#" + canonical, markup = html, query = "") {
       history: { replaceState(state, title, value) { replacements.push(value); href = value; location.hash = new URL(value).hash; } } },
     fetch(url, options) {
       requests.push({ url, options });
-      return url === "downloads/release.json" ? Promise.resolve(result.release) : result.response(url, options);
+      return url === "downloads/release.json" ? Promise.resolve(result.release)
+        : url.endsWith("/v1/invitations/status") ? result.invitationResponse(url, options) : result.response(url, options);
     },
-    crypto: { getRandomValues(bytes) { bytes.fill(++nonceId); return bytes; } },
+    crypto: { getRandomValues(bytes) { bytes.fill(++nonceId); return bytes; },
+      subtle: { async digest(algorithm, bytes) { assert.equal(algorithm, "SHA-256"); return Uint8Array.from(createHash("sha256").update(bytes).digest()).buffer; } } },
     setTimeout(action, delay) { const id = ++timerId; timers.set(id, { action, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
     Date: { now: () => result.now },
     navigator: { clipboard: { async writeText(value) { result.clipboard.push(value); } } },
-    AbortController, URL, atob, btoa, Uint8Array, TextDecoder
+    AbortController, URL, atob, btoa, Uint8Array, TextDecoder, TextEncoder
   };
   Object.defineProperty(sandbox, "localStorage", { get() { throw new Error("Installation must not use browser storage"); } });
   vm.runInNewContext(source, sandbox);
@@ -96,6 +100,8 @@ function state(test, ready) {
   assert.doesNotMatch(test.elements.get("status").textContent, /Checking invitation/);
 }
 assert.doesNotMatch(html, /I installed it|Already installed|First time|id="installed"|id="install-help"/);
+assert.doesNotMatch(html, /brand-mark/);
+assert.doesNotMatch(fs.readFileSync(new URL("./site/installed.html", import.meta.url), "utf8"), /brand-mark/);
 assert.match(html, /connect-src 'self' http:\/\/127\.0\.0\.1:18187/);
 const test = page();
 await flush();
@@ -143,6 +149,7 @@ for (const fragment of ["", "#invalid", "#e30"]) {
   invalid.response = async url => answer(url);
   await poll(invalid);
   assert.equal(invalid.elements.get("connect").disabled, true);
+  assert.equal(invalid.elements.get("download").hidden, true);
   invalid.elements.get("connect").events.click();
   assert.equal(invalid.navigations.length, 0);
   assert.match(invalid.elements.get("status").textContent, /complete invitation/);
@@ -187,9 +194,9 @@ assert.equal(cached.requests.length, 0);
 assert.equal(cached.redirects.length, 1);
 const refresh = new URL(cached.redirects[0]);
 assert.equal(refresh.origin, "https://example.test");
-assert.equal(refresh.search, "?page=4");
+assert.equal(refresh.search, "?page=5");
 assert.equal(refresh.hash, "#" + canonical);
-const stillCached = page("#" + canonical, oldMarkup, "?page=4");
+const stillCached = page("#" + canonical, oldMarkup, "?page=5");
 assert.equal(stillCached.redirects.length, 0, "Never create a reload loop");
 assert.match(stillCached.elements.get("status").textContent, /out of date/);
 
@@ -339,6 +346,8 @@ for (const invalid of [{ version: "2" }, { gateway: "http://fixture.example.work
   assert.throws(() => invitationToken("#" + encodeInvite({ ...enrollmentInvite, ...invalid })));
 }
 const enrolling = page("#" + enrollmentToken);
+assert.equal(enrolling.elements.get("download").hidden, true, "Do not offer installation before checking the invitation");
+assert.match(enrolling.elements.get("status").textContent, /Checking invitation/);
 await flush();
 enrolling.response = async url => answer(url);
 await poll(enrolling);
@@ -366,4 +375,57 @@ for (const request of enrolling.requests) {
   assert.ok(!JSON.stringify(request).includes(enrollmentToken));
   assert.ok(!JSON.stringify(request).includes(enrollmentInvite.token));
 }
+const statusRequest = enrolling.requests.find(request => request.url.endsWith("/v1/invitations/status"));
+assert.equal(statusRequest.url, enrollmentInvite.gateway + "/v1/invitations/status");
+assert.equal(statusRequest.options.method, "POST");
+assert.equal(statusRequest.options.credentials, "omit");
+assert.equal(statusRequest.options.redirect, "error");
+assert.equal(statusRequest.options.cache, "no-store");
+assert.equal(statusRequest.options.referrerPolicy, "no-referrer");
+assert.deepEqual(JSON.parse(statusRequest.options.body), { invite_id: enrollmentInvite.invite_id,
+  token_hash: createHash("sha256").update(enrollmentInvite.token).digest("hex") });
+for (const status of ["expired", "revoked", "invalid", "redeemed"]) {
+  const checked = page("#" + enrollmentToken, html, "", status);
+  await flush();
+  assert.equal(checked.elements.get("download").hidden, true, status + " invitation must not offer installation");
+  assert.equal(checked.elements.get("install-guide").hidden, true);
+  assert.equal(checked.elements.get("connect").hidden, true);
+  assert.equal(checked.navigations.length, 0);
+  checked.response = async url => answer(url, { enrollment: 2 });
+  await poll(checked);
+  assert.equal(checked.elements.get("connect").hidden, status !== "redeemed");
+  assert.match(checked.elements.get("status").textContent, status === "redeemed" ? /already been accepted/ : new RegExp(status));
+}
+const savedPage = page("#" + encodeInvite(savedBookmark));
+await flush();
+assert.equal(savedPage.elements.get("download").hidden, true);
+assert.match(savedPage.elements.get("status").textContent, /saved workspace/);
+assert(!savedPage.requests.some(request => request.url.endsWith("/v1/invitations/status")), "A nonsecret bookmark is not an invitation capability");
+
+const unavailableInvite = page("#" + enrollmentToken, html, "", "unexpected");
+await flush();
+assert.equal(unavailableInvite.elements.get("download").hidden, true);
+assert.equal(unavailableInvite.elements.get("retry").hidden, false);
+assert.match(unavailableInvite.elements.get("status").textContent, /Could not check/);
+unavailableInvite.invitationResponse = async () => ({ ok: true, json: async () => ({ state: "unused" }) });
+unavailableInvite.elements.get("retry").events.click();
+await flush();
+assert.equal(unavailableInvite.elements.get("download").hidden, false);
+assert.equal(unavailableInvite.elements.get("retry").hidden, true);
+unavailableInvite.invitationResponse = async () => ({ ok: true, json: async () => ({ state: "redeemed" }) });
+unavailableInvite.now += 15000;
+await poll(unavailableInvite);
+assert.equal(unavailableInvite.elements.get("download").hidden, true, "An invitation redeemed elsewhere updates without reloading");
+
+const timeoutInvite = page("#" + enrollmentToken);
+timeoutInvite.invitationResponse = (url, options) => new Promise((resolve, reject) => {
+  options.signal.addEventListener("abort", () => reject(new Error("Timed out")));
+});
+await flush();
+const statusDeadline = [...timeoutInvite.timers].find(([, value]) => value.delay === 5000);
+assert.ok(statusDeadline);
+statusDeadline[1].action();
+await flush();
+assert.match(timeoutInvite.elements.get("status").textContent, /Could not check/);
+assert.equal(timeoutInvite.elements.get("retry").hidden, false);
 console.log("Invitation parsing, live detection/status, progress, reconnect, security, timeout and cached-page tests passed.");

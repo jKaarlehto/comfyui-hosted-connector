@@ -2,9 +2,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 main { width: min(100% - 40px, 560px); margin: 76px auto; }
-.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 38px; font-size: 1.25rem; letter-spacing: -.025em; }
+.brand { margin-bottom: 38px; font-size: 1.25rem; letter-spacing: -.025em; }
 .brand strong { font-weight: 650; }
-.brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 5px; background: #303bc7; color: white; font-weight: 700; font-size: 1.1rem; }
 h1 { font-size: 1.7rem; font-weight: 600; letter-spacing: -.03em; line-height: 1.2; margin: 0 0 16px; }
 p { margin: 14px 0 22px; }
 a { color: #284ba1; text-underline-offset: 3px; }

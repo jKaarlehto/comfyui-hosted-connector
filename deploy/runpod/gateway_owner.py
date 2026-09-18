@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -70,6 +71,8 @@ def setup(args, state, state_file):
             "RUNPOD_STARTER_ID:" + state["broker_id"],
             "--var",
             "WORKSPACE_NAME:" + state["config"]["name"],
+            "--var",
+            "INVITATION_ORIGIN:" + invitation_origin(state),
         ],
         directory,
         environment,
@@ -130,6 +133,13 @@ def setup(args, state, state_file):
     print(
         "The GPU template is updated. Stop and reconnect the workspace to apply device authorization."
     )
+
+
+def invitation_origin(state):
+    site = urllib.parse.urlsplit(state.get("invitation_site", "https://jkaarlehto.github.io/comfyui-hosted-connector/"))
+    if site.scheme != "https" or not site.hostname or site.username or site.password or site.query or site.fragment:
+        raise RuntimeError("Set an HTTPS invitation site without credentials, query or fragment")
+    return "https://" + site.netloc.lower()
 
 
 def starter_policy(endpoint):

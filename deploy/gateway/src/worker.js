@@ -143,7 +143,23 @@ function cleanOutput(output) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.protocol !== 'https:' || url.search || request.headers.has('Origin')) return reply({ error: 'Request is not allowed' }, 403);
+    if (url.protocol !== 'https:' || url.search) return reply({ error: 'Request is not allowed' }, 403);
+    const origin = request.headers.get('Origin');
+    if (origin !== null) {
+      if (origin !== env.INVITATION_ORIGIN || url.pathname !== '/v1/invitations/status' ||
+          !['POST', 'OPTIONS'].includes(request.method)) return reply({ error: 'Request is not allowed' }, 403);
+      const headers = { 'Access-Control-Allow-Origin': origin, Vary: 'Origin', 'Cache-Control': 'no-store' };
+      if (request.method === 'OPTIONS') {
+        if (request.headers.get('Access-Control-Request-Method') !== 'POST' ||
+            (request.headers.get('Access-Control-Request-Headers') || '').toLowerCase() !== 'content-type') return reply({ error: 'Request is not allowed' }, 403);
+        return new Response(null, { status: 204, headers: { ...headers,
+          'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Max-Age': '600' } });
+      }
+      const response = await env.WORKSPACE.get(env.WORKSPACE.idFromName('workspace')).fetch(request);
+      const result = new Response(response.body, response);
+      for (const [key, value] of Object.entries(headers)) result.headers.set(key, value);
+      return result;
+    }
     if (url.pathname.length > 200 || !url.pathname.startsWith('/v1/')) return reply({ error: 'Not found' }, 404);
     return env.WORKSPACE.get(env.WORKSPACE.idFromName('workspace')).fetch(request);
   },
@@ -211,6 +227,10 @@ export class Workspace extends DurableObject {
       const ipHash = await digest(ip.slice(0, 64));
       this.limit('ip:' + ipHash, 300);
       const path = new URL(request.url).pathname;
+      if (path === '/v1/invitations/status' && request.method === 'POST') {
+        this.limit('invite-status:' + ipHash, 40);
+        return await this.invitationStatus(request);
+      }
       if (path.startsWith('/v1/admin/')) {
         await this.secret(request, 'GATEWAY_ADMIN_KEY');
         return await this.admin(request, path);
@@ -282,6 +302,18 @@ export class Workspace extends DurableObject {
       return reply({ revoked: true });
     }
     fail(404, 'Not found');
+  }
+
+  async invitationStatus(request) {
+    const data = await body(request, ['invite_id', 'token_hash']);
+    if (!validHex(data.invite_id, 32) || !validHex(data.token_hash, 64)) fail(400, 'Invalid invitation');
+    const invite = this.one('SELECT * FROM invites WHERE id = ?', data.invite_id);
+    if (!invite || !equal(invite.token_hash, data.token_hash)) return reply({ state: 'invalid' });
+    if (invite.device_id) {
+      const device = this.one('SELECT revoked_at FROM devices WHERE id = ?', invite.device_id);
+      return reply({ state: device && device.revoked_at === null ? 'redeemed' : 'revoked' });
+    }
+    return reply({ state: invite.revoked_at !== null ? 'revoked' : invite.expires_at <= now() ? 'expired' : 'unused' });
   }
 
   async enroll(request) {

@@ -29,7 +29,8 @@ function runtime(persist) {
     durableObjects: { WORKSPACE: { className: 'TestWorkspace', useSQLite: true } },
     durableObjectsPersist: persist ?? false,
     bindings: { GATEWAY_ADMIN_KEY: adminKey, GATEWAY_SERVER_KEY: serverKey,
-      RUNPOD_STARTER_KEY: starterKey, RUNPOD_STARTER_ID: 'test-endpoint', WORKSPACE_NAME: 'Test workspace' },
+      RUNPOD_STARTER_KEY: starterKey, RUNPOD_STARTER_ID: 'test-endpoint', WORKSPACE_NAME: 'Test workspace',
+      INVITATION_ORIGIN: 'https://jkaarlehto.github.io' },
     fetchMock: mock,
     log: new Log(LogLevel.NONE),
   });
@@ -41,7 +42,7 @@ function runtime(persist) {
         ...(key ? { Authorization: 'Bearer ' + key } : {}), ...(device ? { 'X-Device-ID': device } : {}), ...headers },
       body: value === undefined ? undefined : JSON.stringify(value),
     });
-    return { status: response.status, headers: response.headers, data: await response.json() };
+    return { status: response.status, headers: response.headers, data: response.status === 204 ? null : await response.json() };
   }
   const admin = (path, method = 'GET', value) => request('/v1/admin/' + path, { method, value, key: adminKey });
   async function invitation() {
@@ -93,6 +94,69 @@ test('same-binding concurrent retries remain idempotent', async t => {
   assert(results.every(x => x.status === 200));
   assert.equal(new Set(results.map(x => x.id)).size, 1);
   assert.equal((await (await r.object()).rows()).devices.length, 1);
+});
+
+test('browser status authenticates a hash and never enrolls, wakes or exposes device data', async t => {
+  const r = runtime(); t.after(() => r.mf.dispose());
+  const invite = await r.invitation();
+  const request = { method: 'POST', headers: { Origin: 'https://jkaarlehto.github.io' },
+    value: { invite_id: invite.invite_id, token_hash: hash(invite.token) } };
+  const before = JSON.stringify(await (await r.object()).rows());
+  const initial = await r.request('/v1/invitations/status', request);
+  assert.equal(initial.status, 200);
+  assert.deepEqual(initial.data, { state: 'unused' });
+  assert.equal(initial.headers.get('Access-Control-Allow-Origin'), 'https://jkaarlehto.github.io');
+  assert.equal(initial.headers.get('Cache-Control'), 'no-store');
+  assert.equal(initial.headers.get('Access-Control-Allow-Credentials'), null);
+  assert.equal(JSON.stringify(await (await r.object()).rows()), before);
+  assert.deepEqual((await r.request('/v1/invitations/status', { ...request,
+    value: { ...request.value, token_hash: 'd'.repeat(64) } })).data, { state: 'invalid' });
+  assert.deepEqual((await r.request('/v1/invitations/status', { ...request,
+    value: { ...request.value, invite_id: 'e'.repeat(32) } })).data, { state: 'invalid' });
+  const device = await r.enroll(invite);
+  assert.equal(device.status, 200);
+  assert.deepEqual((await r.request('/v1/invitations/status', request)).data, { state: 'redeemed' });
+  await (await r.object()).expire(invite.invite_id);
+  await r.admin('invites/' + invite.invite_id + '/revoke', 'POST', {});
+  assert.deepEqual((await r.request('/v1/invitations/status', request)).data, { state: 'redeemed' }, 'Invitation revocation does not revoke enrolled access');
+  await r.admin('devices/' + device.id + '/revoke', 'POST', {});
+  assert.deepEqual((await r.request('/v1/invitations/status', request)).data, { state: 'revoked' });
+  const expired = await r.invitation();
+  await (await r.object()).expire(expired.invite_id);
+  assert.deepEqual((await r.request('/v1/invitations/status', { ...request,
+    value: { invite_id: expired.invite_id, token_hash: hash(expired.token) } })).data, { state: 'expired' });
+  await r.admin('invites/' + expired.invite_id + '/revoke', 'POST', {});
+  assert.deepEqual((await r.request('/v1/invitations/status', { ...request,
+    value: { invite_id: expired.invite_id, token_hash: hash(expired.token) } })).data, { state: 'revoked' });
+  r.mock.assertNoPendingInterceptors();
+});
+
+test('browser access is limited to read-only status and one configured origin', async t => {
+  const r = runtime(); t.after(() => r.mf.dispose());
+  const path = '/v1/invitations/status', origin = 'https://jkaarlehto.github.io';
+  const headers = { Origin: origin, 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type' };
+  const preflight = await r.request(path, { method: 'OPTIONS', headers });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get('Access-Control-Allow-Origin'), origin);
+  assert.equal(preflight.headers.get('Access-Control-Allow-Methods'), 'POST');
+  for (const invalid of [{ Origin: 'null' }, { Origin: 'https://evil.test' }, { Origin: origin + '.evil.test' },
+    { 'Access-Control-Request-Method': 'GET' }, { 'Access-Control-Request-Headers': 'authorization,content-type' }]) {
+    assert.equal((await r.request(path, { method: 'OPTIONS', headers: { ...headers, ...invalid } })).status, 403);
+  }
+  for (const route of ['/v1/enroll', '/v1/connect', '/v1/admin/invites', '/v1/server/keys']) {
+    const rejected = await r.request(route, { method: 'POST', headers: { Origin: origin }, value: {} });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.headers.get('Access-Control-Allow-Origin'), null);
+  }
+  const invite = await r.invitation();
+  for (const value of [{ invite_id: [invite.invite_id], token_hash: hash(invite.token) },
+    { invite_id: invite.invite_id, token_hash: [hash(invite.token)] },
+    { invite_id: invite.invite_id, token_hash: hash(invite.token) + '\n' },
+    { invite_id: invite.invite_id, token_hash: hash(invite.token), token: invite.token }]) {
+    const rejected = await r.request(path, { method: 'POST', headers: { Origin: origin }, value });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.headers.get('Access-Control-Allow-Origin'), origin);
+  }
 });
 
 test('expiration, invitation revocation and device revocation have separate effects', async t => {

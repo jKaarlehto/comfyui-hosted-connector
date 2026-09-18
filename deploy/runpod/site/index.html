@@ -1,22 +1,23 @@
 <!doctype html>
-<html lang="en" data-connector-page="4">
+<html lang="en" data-connector-page="5">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:18187; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:18187 https://*.workers.dev; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>ComfyUI Notch — Connect</title>
   <link rel="stylesheet" href="style.css">
   <script src="connect.js" defer></script>
 </head>
 <body>
   <main>
-    <div class="brand"><span class="brand-mark" aria-hidden="true">N</span><span>ComfyUI <strong>Notch</strong></span></div>
+    <div class="brand">ComfyUI <strong>Notch</strong></div>
     <h1>Your hosted workspace</h1>
     <p>Connect to ComfyUI from Notch and your browser.</p>
     <div class="actions">
-      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer">Download and install</a>
+      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe" download rel="noreferrer" hidden>Download and install</a>
       <button id="connect" class="button primary" type="button" hidden disabled>Connect</button>
+      <button id="retry" class="button primary" type="button" hidden>Check again</button>
       <a id="open" class="button primary" target="_blank" rel="noopener noreferrer" hidden>Open ComfyUI</a>
     </div>
     <p id="status" class="note" role="status" aria-live="polite">Install the connector to continue. Allow local access if your browser asks.</p>

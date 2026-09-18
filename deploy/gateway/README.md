@@ -12,6 +12,14 @@ Deploy through the owner setup helper in `../runpod`. Its configuration supplies
 
 The gateway does not need a Runpod account control key. Secrets must be different, randomly generated values. Never put them in Wrangler configuration or a tester invitation. Observability is disabled to keep request data out of Worker logs.
 
+`INVITATION_ORIGIN` is the exact HTTPS origin of the invitation page, derived by owner setup from the configured site URL. Only the read-only status endpoint permits requests from this browser origin; enrollment, device and owner endpoints still reject browser origins.
+
+## Invitation status
+
+The page posts `{invite_id,token_hash}` to `/v1/invitations/status` before offering installation. The hash is SHA-256 of the UTF-8 invitation token; the raw token is not sent. The response contains only `{state}`: `unused`, `redeemed`, `expired`, `revoked` or `invalid`. A wrong hash and an unknown ID both return `invalid`. This request cannot consume an invitation, register a device or start the Pod.
+
+The page refreshes status every fifteen seconds while visible and before connection. A failed check offers retry instead of installation. Redeemed invitations still allow an installed connector to reopen access on the original computer. Revoking an invitation after enrollment does not revoke its device; status remains `redeemed` until the device itself is revoked.
+
 ## Tester requests
 
 An invitation contains `{version:2,gateway,invite_id,token}`. The ID is 32 lowercase hexadecimal characters and the token is 64. The connector generates and saves its SSH key and independent 256-bit reconnect secret before submitting:

@@ -7,6 +7,7 @@
   "preview_urls": false,
   "vars": {
     "WORKSPACE_NAME": "ComfyUI Notch",
+    "INVITATION_ORIGIN": "https://jkaarlehto.github.io",
     "RUNPOD_STARTER_ID": ""
   },
   "durable_objects": {

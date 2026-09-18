@@ -222,6 +222,13 @@ class GatewayOwnerTests(unittest.TestCase):
         self.assertEqual(statement["Actions"], ["serverless:Read", "serverless:Write"])
         self.assertEqual(statement["Resources"], ["runpod/serverless/*/endpoint/*"])
 
+    def test_browser_origin_is_derived_from_the_configured_invitation_site(self):
+        self.assertEqual(gateway_owner.invitation_origin({}), "https://jkaarlehto.github.io")
+        self.assertEqual(gateway_owner.invitation_origin({"invitation_site": "https://example.test/invites/"}), "https://example.test")
+        for site in ("http://example.test/", "https://user:password@example.test/", "https://example.test/?key=x", "https://example.test/#token"):
+            with self.assertRaises(RuntimeError):
+                gateway_owner.invitation_origin({"invitation_site": site})
+
     def test_v2_invitation_needs_no_pod_or_private_ssh_key(self):
         with tempfile.TemporaryDirectory() as directory:
             args = types.SimpleNamespace(
