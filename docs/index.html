@@ -1,23 +1,33 @@
 <!doctype html>
-<html lang="en" data-connector-page="2">
+<html lang="en" data-connector-page="3">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:18187; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Hosted ComfyUI</title>
-  <link rel="stylesheet" href="style.css?v=04d6004619cd5ebc9621809b3588a41cf76967c339b23ae56052619db980a5e4">
-  <script src="connect.js?v=4c60450323cabfd0d4bb3d97bedc65ec4c218a2711f2840856497f733906a062" defer></script>
+  <link rel="stylesheet" href="style.css?v=98143a4d62b97f4a72f0cb175da9b00701c2ae90fee899e006507e220e6e90bb">
+  <script src="connect.js?v=32c10981e9e2c3023f10c69efa8cfd983bcb94053e96c77ccc99ebb118b03c1e" defer></script>
 </head>
 <body>
   <main>
     <h1>Hosted ComfyUI</h1>
     <p>Connect to the workspace you were invited to. Its WebUI will open when ready.</p>
     <div class="actions">
-      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe?v=3ee070d611b2b0d27bf7e6db61c93e5240106a820ab9cddfef685689aacf2fff" download rel="noreferrer">Download and install</a>
+      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe?v=beaa4c0acb6216c391ef9b95ac4d1711c9458f53a7826f02056a82d1a09178cd" download rel="noreferrer">Download and install</a>
       <button id="connect" class="button primary" type="button" hidden disabled>Connect</button>
+      <a id="open" class="button primary" target="_blank" rel="noopener noreferrer" hidden>Open ComfyUI</a>
     </div>
     <p id="status" class="note" role="status" aria-live="polite">Install the connector to continue. Allow local access if your browser asks.</p>
+    <div id="endpoint" class="endpoint" hidden>
+      <span class="note">Local address for your browser and Notch</span>
+      <div class="address-row"><code id="address"></code><button id="copy" class="copy" type="button">Copy address</button></div>
+    </div>
+    <div id="model" class="model" hidden>
+      <p id="model-status" class="note" role="status" aria-live="polite"></p>
+      <p id="model-file" class="filename"></p>
+      <progress id="model-progress" max="100" aria-label="Model download progress"></progress>
+    </div>
     <ol id="install-guide" hidden>
       <li>Open <strong>HostedComfyUIConnector.exe</strong> from your browser's downloads menu, usually near the upper right.</li>
       <li>Confirm installation for your Windows account.</li>
