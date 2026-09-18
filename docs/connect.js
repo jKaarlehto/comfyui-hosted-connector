@@ -29,6 +29,12 @@ function randomToken() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function currentConnector(version) {
+  if (typeof version !== "string" || !/^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$/.test(version) || version !== version.trim()) return false;
+  const parts = version.split(".").map(Number);
+  return parts[0] > 1 || (parts[0] === 1 && (parts[1] > 1 || (parts[1] === 1 && parts[2] >= 1)));
+}
+
 function localAddress(value) {
   if (typeof value !== "string" || value !== value.trim() || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}\/?$/.test(value)) return "";
   try {
@@ -66,10 +72,10 @@ function modelStatus(value) {
 }
 
 function initializePage() {
-  if (document.documentElement.dataset.connectorPage !== "4") {
+  if (document.documentElement.dataset.connectorPage !== "5") {
     const address = new URL(window.location.href);
-    if (address.searchParams.get("page") !== "4") {
-      address.searchParams.set("page", "4");
+    if (address.searchParams.get("page") !== "5") {
+      address.searchParams.set("page", "5");
       window.location.replace(address.href);
     } else {
       const status = document.getElementById("status");
@@ -78,6 +84,7 @@ function initializePage() {
     return;
   }
   const connect = document.getElementById("connect");
+  const retry = document.getElementById("retry");
   const download = document.getElementById("download");
   const status = document.getElementById("status");
   const guide = document.getElementById("install-guide");
@@ -108,14 +115,20 @@ function initializePage() {
   let timer;
   let pending;
   let stopped = false;
+  let invitationState = !token ? "invalid" : invitation.version === 2 ? (invitation.token ? "checking" : "saved") : "legacy";
+  let invitationPending;
+  let invitationNextCheck = 0;
   const render = () => {
+    const allowed = session || ["legacy", "unused", "redeemed", "saved"].includes(invitationState);
+    const installAllowed = session || ["legacy", "unused"].includes(invitationState) || (outdated && ["redeemed", "saved"].includes(invitationState));
     const waiting = session && !snapshot && Date.now() - launchedAt < 20000 && !localError;
     const connected = ready && snapshot?.state === "connected" && !localError;
     const busy = waiting || (ready && snapshot?.state === "starting" && !localError);
-    download.hidden = ready;
+    download.hidden = ready || !installAllowed;
     download.textContent = outdated ? "Update connector" : "Download and install";
-    connect.hidden = !ready || connected || busy;
-    connect.disabled = !token || !ready || busy;
+    connect.hidden = !allowed || !ready || connected || busy;
+    connect.disabled = !allowed || !token || !ready || busy;
+    retry.hidden = session || invitationState !== "unavailable";
     connect.textContent = session ? "Reconnect" : "Connect";
     open.hidden = !connected;
     endpoint.hidden = !connected;
@@ -136,10 +149,23 @@ function initializePage() {
       if (transfer.percent === null) progress.removeAttribute("value");
       else progress.value = transfer.percent;
     }
-    guide.hidden = ready || !installing;
+    guide.hidden = ready || !installing || !installAllowed;
+    const invitationMessage = session ? "" : {
+      checking: "Checking invitation…",
+      expired: "This invitation has expired. Ask the owner for a new link.",
+      revoked: "This invitation's access has been revoked. Ask the owner for a new link.",
+      invalid: "This invitation is invalid. Ask the owner for a new link.",
+      unavailable: "Could not check this invitation. Try again shortly.",
+      redeemed: outdated ? "This invitation has already been accepted. Update your existing connector to reopen access saved on this computer."
+        : ready ? "This invitation has already been accepted. Connect if you accepted it on this computer; otherwise ask the owner for a new link."
+        : "This invitation has already been accepted. Use Saved workspaces in the connector on the original computer, or ask the owner for a new link.",
+      saved: outdated ? "Update your existing connector to open this saved workspace."
+        : ready ? "This is a saved workspace. Connect using this computer's saved access."
+        : "This link opens a saved workspace on the original computer. Use its connector, or ask the owner for a new invitation."
+    }[invitationState];
     const message = !token
       ? "Open the complete invitation link sent by your host."
-      : outdated ? "Update the connector to open this workspace and show its progress here."
+      : invitationMessage || (outdated ? "Update the connector to open this workspace and show its progress here."
       : !ready && session ? "The local connector is not responding. Open it again or reinstall it."
       : localError || (ready && session
         ? snapshot
@@ -149,10 +175,40 @@ function initializePage() {
         : ready ? "Connector detected. You're ready to connect."
         : installerAvailable
           ? "Install the connector to continue. Allow local access if your browser asks."
-          : "The connector download is being prepared. Please return shortly.");
+          : "The connector download is being prepared. Please return shortly."));
     if (status.textContent !== message) status.textContent = message;
   };
   render();
+  const checkInvitation = async () => {
+    if (invitation?.version !== 2 || !invitation.token || invitationPending || session || stopped || document.hidden) return;
+    const controller = new AbortController();
+    invitationPending = controller;
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    let state = "unavailable";
+    try {
+      const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(invitation.token));
+      const tokenHash = Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("");
+      const response = await fetch(invitation.gateway + "/v1/invitations/status", {
+        method: "POST", mode: "cors", credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer", redirect: "error",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ invite_id: invitation.invite_id, token_hash: tokenHash }), signal: controller.signal
+      });
+      if (response.ok) {
+        const value = await response.json();
+        if (value && ["unused", "redeemed", "expired", "revoked", "invalid"].includes(value.state)) state = value.state;
+      }
+    } catch { }
+    finally { clearTimeout(timeout); invitationPending = null; }
+    if (stopped || session) return;
+    invitationState = state;
+    invitationNextCheck = Date.now() + 15000;
+    render();
+  };
+  retry.addEventListener("click", () => {
+    invitationState = "checking";
+    render();
+    checkInvitation();
+  });
   download.addEventListener("click", () => { installing = true; render(); });
   connect.addEventListener("click", () => {
     if (!token || !ready || connect.disabled) return;
@@ -184,6 +240,7 @@ function initializePage() {
     if (pending || stopped) return;
     clearTimeout(timer);
     if (document.hidden) return;
+    if (Date.now() >= invitationNextCheck) checkInvitation();
     const controller = new AbortController();
     pending = controller;
     const timeout = setTimeout(() => controller.abort(), 4500);
@@ -195,7 +252,7 @@ function initializePage() {
       const nonce = randomToken();
       const value = await read("/status?nonce=" + nonce, controller.signal);
       detected = value && value.app === "hosted-comfyui-connector" && value.protocol === 1 && value.nonce === nonce;
-      capable = detected && value.live_status === 1 && (invitation?.version !== 2 || value.enrollment === 2);
+      capable = detected && currentConnector(value.version) && value.live_status === 1 && (invitation?.version !== 2 || value.enrollment === 2);
       if (capable && requestedSession) {
         const statusNonce = randomToken();
         current = sessionStatus(await read("/session?session=" + requestedSession + "&nonce=" + statusNonce, controller.signal), requestedSession, statusNonce);
@@ -236,6 +293,7 @@ function initializePage() {
     stopped = true;
     clearTimeout(timer);
     if (pending) pending.abort();
+    if (invitationPending) invitationPending.abort();
   });
   window.addEventListener("pageshow", () => { stopped = false; check(); });
   check();
