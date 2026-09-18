@@ -15,6 +15,7 @@ $ProgressPreference = 'SilentlyContinue'
 $tunnel = $null
 $work = $null
 $storageProgress = $null
+. (Join-Path $PSScriptRoot 'hosted_access.ps1')
 
 function Write-State([string]$Message) {
     Write-Host ("[{0:HH:mm:ss}] {1}" -f (Get-Date), $Message) -ForegroundColor Cyan
@@ -118,22 +119,33 @@ function Invoke-StarterRequest([string]$Uri, [string]$Method, $Headers, [string]
 }
 
 function Invoke-Starter($Access, [DateTime]$Deadline) {
-    $uri = "https://api.runpod.ai/v2/$($Access.endpoint)"
-    $headers = @{Authorization = "Bearer $($Access.key)"; 'User-Agent' = 'ComfyUI-Notch-Runpod/0.1'}
-    $job = Invoke-StarterRequest "$uri/run" 'Post' $headers '{"input":{"action":"connect"}}'
+    $enrolled = $Access.version -eq 2
+    if ($enrolled) {
+        $headers = @{Authorization = "Bearer $($Access.credential)"; 'X-Device-ID' = $Access.device_id}
+        $job = Invoke-WorkspaceRequest $Access.gateway '/v1/connect' 'POST' $headers '{}'
+    } else {
+        $uri = "https://api.runpod.ai/v2/$($Access.endpoint)"
+        $headers = @{Authorization = "Bearer $($Access.key)"; 'User-Agent' = 'ComfyUI-Notch-Runpod/0.1'}
+        $job = Invoke-StarterRequest "$uri/run" 'Post' $headers '{"input":{"action":"connect"}}'
+    }
     try {
         while ($job.status -in @('IN_QUEUE', 'IN_PROGRESS')) {
+            if ($job.id -cnotmatch '\A[A-Za-z0-9_-]{1,128}\z') { throw 'The starter returned an invalid job.' }
             if ((Get-Date) -gt $Deadline) { throw 'The starter did not respond in time. Try again later.' }
             Wait-Connection 3
-            $job = Invoke-StarterRequest "$uri/status/$($job.id)" 'Get' $headers
+            if ($enrolled) { $job = Invoke-WorkspaceRequest $Access.gateway "/v1/jobs/$($job.id)" 'GET' $headers }
+            else { $job = Invoke-StarterRequest "$uri/status/$($job.id)" 'Get' $headers }
         }
         if ($job.status -ne 'COMPLETED' -or $job.output.error) {
             throw 'The hosted server could not be started. Try again, or contact the person who invited you.'
         }
         return $job.output
     } finally {
-        if ($job.status -in @('IN_QUEUE', 'IN_PROGRESS')) {
-            try { Invoke-StarterRequest "$uri/cancel/$($job.id)" 'Post' $headers | Out-Null } catch { }
+        if ($job.status -in @('IN_QUEUE', 'IN_PROGRESS') -and $job.id -cmatch '\A[A-Za-z0-9_-]{1,128}\z') {
+            try {
+                if ($enrolled) { Invoke-WorkspaceRequest $Access.gateway "/v1/jobs/$($job.id)/cancel" 'POST' $headers '{}' | Out-Null }
+                else { Invoke-StarterRequest "$uri/cancel/$($job.id)" 'Post' $headers | Out-Null }
+            } catch { }
         }
     }
 }
@@ -171,7 +183,11 @@ try {
     $encoded = $encoded.Replace('-', '+').Replace('_', '/')
     $encoded = $encoded.PadRight([int]([Math]::Ceiling($encoded.Length / 4.0) * 4), '=')
     $access = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
-    if ($access.version -ne 1 -or $access.endpoint -notmatch '^[a-z0-9]{8,40}$' -or
+    if ($access.version -eq 2) {
+        $access = Open-WorkspaceAccess $access ([IO.Path]::GetDirectoryName($saved))
+        $encoded = Get-WorkspaceBookmark $access
+        if ($ConnectorMode) { Write-Output "HOSTED_COMFYUI_SAVED=$encoded" }
+    } elseif ($access.version -ne 1 -or $access.endpoint -notmatch '^[a-z0-9]{8,40}$' -or
         $access.key -notmatch '^[A-Za-z0-9_-]{20,200}$' -or
         $access.ssh_key -notmatch '^-----BEGIN OPENSSH PRIVATE KEY-----') {
         throw 'This invitation code is invalid. Ask the owner for a new code.'
@@ -219,11 +235,16 @@ try {
     $sshArgs = Get-TunnelArguments $remote $keyFile $knownHosts $LocalPort
     $url = "http://127.0.0.1:$LocalPort"
     $lastState = ''
+    $accessDeadline = (Get-Date).AddSeconds(90)
     do {
         if ((Get-Date) -gt $deadline) { throw "ComfyUI did not become ready. Check $(Join-Path $work 'ssh.log')." }
         if ($tunnel -and $tunnel.HasExited) {
             if ((Get-Content -LiteralPath (Join-Path $work 'ssh.log') -Raw) -match 'Permission denied') {
-                throw 'The server rejected your tunnel key. Ask the owner to renew your invitation.'
+                if ($access.version -ne 2 -or (Get-Date) -ge $accessDeadline) {
+                    throw 'The server rejected your tunnel key. Ask the owner to renew your invitation.'
+                }
+                Write-State 'Waiting for workspace access'
+                Wait-Connection 5
             }
             $remote = Invoke-Starter $access $deadline
             if ($remote.state -eq 'unavailable') { throw $remote.message }
@@ -267,7 +288,7 @@ try {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
         $form = New-Object Windows.Forms.Form
-        $form.Text = 'Hosted ComfyUI - Connected'
+        $form.Text = 'ComfyUI Notch - Connected'
         $form.ClientSize = New-Object Drawing.Size(560, 210)
         $form.StartPosition = 'CenterScreen'
         $label = New-Object Windows.Forms.Label

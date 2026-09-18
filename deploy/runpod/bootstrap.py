@@ -20,6 +20,7 @@ _MODEL_STORE_SCRIPT = ""
 _MODEL_CACHE_SCRIPT = ""
 _PARK_SCRIPT = ""
 _HEALTH_SCRIPT = ""
+_SERVER_KEYS_SCRIPT = ""
 COMFY_UPDATE_SCRIPT = """
 echo "[Notch Runpod] Updating ComfyUI"
 git -C "$COMFYUI_DIR" fetch --quiet --depth=1 https://github.com/Comfy-Org/ComfyUI.git "$NOTCH_COMFY_REF" || exit $?
@@ -83,6 +84,7 @@ def main():
     port = int(os.environ.get("NOTCH_COMFY_PORT", "8188"))
     if not 1 <= port <= 65535:
         raise ValueError("Invalid ComfyUI port")
+    configure_gateway(port)
     health_key = os.environ.get("NOTCH_HEALTH_PUBLIC_KEY", "")
     if health_key:
         if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+", health_key):
@@ -303,6 +305,29 @@ def prepare_http_requirements(source, target):
     lines = source.read_text(encoding="utf-8").splitlines()
     lines = [line for line in lines if not re.match(r"\s*cuda[-_]python(?:[<=>!~;\s\[]|$)", line, re.IGNORECASE)]
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def configure_gateway(port):
+    gateway = os.environ.pop("NOTCH_GATEWAY_URL", "")
+    key = os.environ.pop("NOTCH_GATEWAY_SERVER_KEY", "")
+    Path("/opt/notch-gateway-keys.json").unlink(missing_ok=True)
+    if not gateway and not key:
+        return
+    if not gateway or not re.fullmatch(r"[a-f0-9]{64}", key):
+        raise ValueError("Incomplete device gateway configuration")
+    script = Path("/opt/notch-server-keys.py")
+    script.write_text(_SERVER_KEYS_SCRIPT, encoding="utf-8")
+    script.chmod(0o644)
+    config = Path("/opt/notch-gateway.json")
+    config.touch(mode=0o600, exist_ok=True)
+    config.chmod(0o600)
+    config.write_text(json.dumps({"gateway": gateway, "key": key, "port": port}))
+    ssh = Path("/etc/ssh/sshd_config")
+    settings = "AuthorizedKeysCommand /usr/bin/python3 /opt/notch-server-keys.py authorize %u %t %k\nAuthorizedKeysCommandUser root\n"
+    current = ssh.read_text()
+    if not current.startswith(settings):
+        ssh.write_text(settings + current)
+    subprocess.Popen(["/usr/bin/python3", "-u", str(script), "watch"], start_new_session=True)
 
 
 def configure_ssh(path):

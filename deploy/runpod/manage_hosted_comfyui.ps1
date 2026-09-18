@@ -14,12 +14,12 @@ $script:PythonArguments = @()
 $script:Tunnel = $null
 
 function Show-OwnerMenu {
-    Write-Host 'Hosted ComfyUI - Owner' -ForegroundColor Cyan
+    Write-Host 'ComfyUI Notch - Owner' -ForegroundColor Cyan
     Write-Host 'Needs Python 3.10+, GitHub CLI and Windows OpenSSH.'
     Write-Host 'Setup uses your GitHub CLI login for the private plugin repository.'
     Write-Host "Owner credentials: $script:EnvFile"
     Write-Host "Deployment state:  $script:StateDir"
-    Write-Host 'First time: 1 setup, 2 deploy, 5 connect, 7 starter, 8 invite.'
+    Write-Host 'First time: 1 setup, 2 deploy, 7 starter, A access gateway, 8 invite.'
     try {
         while ($true) {
             Write-Host ''
@@ -34,6 +34,9 @@ function Show-OwnerMenu {
             Write-Host ' 9  Revoke tester invitation'
             Write-Host ' L  Copy a private invitation link'
             Write-Host ' I  List invited testers'
+            Write-Host ' A  Setup / update invitation gateway'
+            Write-Host ' D  List enrolled devices'
+            Write-Host ' R  Revoke an enrolled device'
             Write-Host ' G  Sign in to GitHub'
             Write-Host ' 0  Exit and close owner tunnel'
             $choice = Read-Host 'Choose'
@@ -77,16 +80,16 @@ function Invoke-OwnerAction([string]$Choice) {
         }
         '8' {
             $guest = Read-GuestName
-            Write-Host 'The Pod must be running. Creating a private invitation package...'
+            Write-Host 'Creating a private invitation. Gateway invitations work while the Pod is stopped.'
             Invoke-OwnerHelper 'hosted.py' @('share', '--guest', $guest)
             $folder = Join-Path $script:StateDir "shares/$guest"
-            Write-Host "Send only the two tester launcher files and invitation.txt from: $folder"
+            Write-Host "Send the private invitation link, or the launcher files and invitation.txt from: $folder"
             Write-Host 'The invitation is private to this tester. Do not share the owner .env or state.'
             Start-Process -FilePath explorer.exe -ArgumentList ('"' + $folder + '"') | Out-Null
         }
         '9' {
             $guest = Read-GuestName
-            Write-Host 'The Pod must be running. Existing tunnels last until closed or the Pod stops.'
+            Write-Host 'This revokes the invitation. For an enrolled device use R. Existing tunnels last until closed or parked.'
             if ((Read-Host "Revoke $guest? [y/N]") -eq 'y') {
                 Invoke-OwnerHelper 'hosted.py' @('revoke', '--guest', $guest)
             }
@@ -107,6 +110,23 @@ function Invoke-OwnerAction([string]$Choice) {
             Write-Host 'Private invitation link copied. Send it only to this tester.' -ForegroundColor Green
         }
         'I' { Invoke-OwnerHelper 'hosted.py' @('list') }
+        'A' {
+            Require-Command 'npm.cmd' 'Install Node.js with npm first.'
+            Write-Host 'Deploys a Cloudflare Worker and updates the GPU template without restarting the Pod.'
+            Write-Host 'Missing Cloudflare credentials are requested and saved privately in the owner .env.'
+            if ((Read-Host 'Configure gateway now? [y/N]') -eq 'y') {
+                Invoke-OwnerHelper 'hosted.py' @('setup-gateway')
+            }
+        }
+        'D' { Invoke-OwnerHelper 'hosted.py' @('devices') }
+        'R' {
+            Invoke-OwnerHelper 'hosted.py' @('devices')
+            $device = (Read-Host 'Device ID to revoke').Trim()
+            if ($device -notmatch '^[a-f0-9]{32}$') { throw 'Use a device ID from the list.' }
+            if ((Read-Host "Revoke device $device? [y/N]") -eq 'y') {
+                Invoke-OwnerHelper 'hosted.py' @('revoke-device', '--device', $device)
+            }
+        }
         default { Write-Host 'Choose one of the listed actions.' }
     }
 }

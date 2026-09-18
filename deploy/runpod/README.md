@@ -1,4 +1,4 @@
-# Hosted ComfyUI for Notch
+# ComfyUI Notch hosted workspace
 
 The owner deploys one private GPU Pod. Testers receive a dedicated invitation that can wake that Pod and open a local SSH tunnel to ComfyUI. Notch connects to `127.0.0.1:18188` using HTTP transport. These tools live in the public `comfyui-hosted-connector` repository; the ComfyUI plugin remains a separate dependency.
 
@@ -6,20 +6,20 @@ The owner deploys one private GPU Pod. Testers receive a dedicated invitation th
 
 ```text
 Public invitation page (static files; no login or backend)
-    -> Windows connector receives the private invitation
-        -> starter key: asks Runpod to wake the hosted workspace
-        -> SSH key: opens the restricted tunnel to ComfyUI
+    -> Windows connector redeems a one-time invitation with the access gateway
+        -> device token: asks the gateway to wake the hosted workspace
+        -> locally generated SSH key: opens the restricted tunnel to ComfyUI
             -> http://127.0.0.1:18188
                 -> browser and Notch use ordinary local HTTP
 ```
 
-The link contains those two reusable tester keys. The connector handles authentication; Notch receives neither key. The owner's Runpod account key stays in the private owner environment/`.env` and the starter's server-side secret. A separate read-only Git deploy key fetches the private plugin on the Pod; it is not included in invitations or the public page.
+After gateway setup, new links contain a one-time enrollment token. The connector keeps its enrolled device credential and SSH private key locally; Notch receives neither. The Cloudflare gateway holds a starter-only Runpod key. The owner's Runpod account key stays in the private owner environment/`.env` and the starter's server-side secret. The Pod's separate gateway server credential only fetches authorized public keys. A read-only Git deploy key fetches the private plugin on the Pod; it is not included in invitations or the public page. Without gateway setup, `share` still issues reusable invitations; existing reusable invitations keep their original access until explicitly revoked.
 
 | Role | Helper | Purpose |
 | --- | --- | --- |
 | Owner | `manage_hosted_comfyui.bat` / `.ps1` | Double-click menu for setup, secrets, Pod controls, owner connection and tester invitations. |
 | Owner | `runpod.py` | Creates the private template and storage, deploys and controls the Pod, and opens an owner tunnel. |
-| Owner | `hosted.py` | Creates the small serverless starter and issues or revokes individual tester invitations. |
+| Owner | `hosted.py` / `gateway_owner.py` | Configures the starter and access gateway, and issues or revokes invitations and enrolled devices. |
 | Tester | `start_hosted_comfyui.bat` | Opens the launcher, accepts an invitation, starts the Pod, and keeps the connection window open. |
 | Tester | `start_hosted_comfyui.ps1` | Implements progress, credential storage, SSH forwarding and the clickable WebUI link. The batch file launches it. |
 | Pod | `bootstrap.py` | Fetches ComfyUI and the private plugin at each start, installs requirements, restores files and starts ComfyUI. |
@@ -29,11 +29,12 @@ The link contains those two reusable tester keys. The connector handles authenti
 | Starter | `broker.py` | Accepts a connect request for the owner's workspace and returns its current SSH endpoint. |
 | Starter | `recovery.py` | Starts or recreates the workspace, tries GPU fallbacks, verifies the replacement and retires the old Pod. |
 | Pod | `health.py` | Checks restored storage, ComfyUI and the plugin through a restricted SSH command. |
+| Pod | `server_keys.py` | Refreshes enrolled public keys and authorizes SSH connections only while its gateway lease is valid. |
 | Publisher | `prepare_site.py` / `publish_site.py` | Stages and publishes an explicit allowlist of public page and connector files. |
 
 ## Owner setup
 
-On Windows, double-click `manage_hosted_comfyui.bat`. Its menu covers setup and secrets, deploy, status, start, stop, opening the WebUI, starter setup, invitation creation and revocation. It stays open after success or failure. Closing the menu closes its owner tunnel. Choose **G** to sign in to GitHub, **8** to create an invitation and open its folder, **L** to copy an existing tester's private invitation link, **I** to list testers, or **9** to revoke one. Listing testers and copying an existing link work while the Pod is stopped.
+On Windows, double-click `manage_hosted_comfyui.bat`. Its menu stays open after success or failure. Closing it closes its owner tunnel. Choose **G** to sign in to GitHub, **A** to configure the invitation gateway, **8** to create an invitation, **L** to copy its private link, **I** to list invitations, **9** to revoke an invitation, **D** to list enrolled devices or **R** to revoke a device. Gateway invitation and device management work while the GPU Pod is stopped.
 
 Install Python 3.10+, GitHub CLI and Windows OpenSSH. Authenticate GitHub CLI with access to the private plugin repository. Set `RUNPOD_API_KEY` in the environment or an owner-only `.env` file. The helper prompts for it when run interactively without either, saves the entered value to `.env` and skips that prompt on later runs. It updates only `RUNPOD_API_KEY` and preserves other settings.
 
@@ -44,19 +45,26 @@ python deploy/runpod/runpod.py setup
 python deploy/runpod/runpod.py deploy
 python deploy/runpod/runpod.py connect --background
 python deploy/runpod/hosted.py setup
+python deploy/runpod/hosted.py setup-gateway
 python deploy/runpod/hosted.py share --guest alice
 python deploy/runpod/hosted.py link --guest alice
+python deploy/runpod/hosted.py devices
+python deploy/runpod/hosted.py revoke-device --device DEVICE_ID
 ```
 
-The Pod must be running when invitations are granted or revoked. Send Alice the two launcher files and her `invitation.txt` from `.runpod/shares/alice/` privately. Run `python deploy/runpod/hosted.py revoke --guest alice` to remove her starter credential and prevent new SSH connections. Existing tunnels remain connected until closed or the Pod stops.
+Gateway setup also requires Node.js/npm and Cloudflare account credentials. Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the private owner `.env`; missing values are requested interactively and saved without replacing other settings. The Cloudflare token needs Workers Scripts edit access and account settings read access for the selected account. `setup-gateway` installs the pinned gateway dependencies, deploys its Worker/Durable Object, provisions a scoped starter key and stores its administrative and server keys privately. It updates the GPU template without restarting the Pod. Stop and reconnect the workspace once to apply the new SSH authorization helper before issuing device access.
 
-Successful revocation also removes that tester's generated local invitation, link and SSH key files. Copies already delivered to the tester cannot be erased remotely, but their credentials are revoked. Reissuing the same tester name creates a fresh SSH key and starter credential, so an old link does not regain access. If a remote update fails, the helper marks the invitation's revocation pending and retains its control record for a retry. Sharing other invitations cannot restore a pending tester's SSH access. Use `python deploy/runpod/hosted.py list` to list recorded tester names and pending revocations without contacting Runpod.
+Once configured, `share` creates a one-time invitation valid for seven days; `--invite-days 1..30` changes its expiry. Repeating `share` reuses an existing unused invitation. Send the private link, or the three launcher files and `invitation.txt` from `.runpod/shares/alice/`. The GPU does not need to be running. A leaked unused link can enroll one device and incur workspace GPU usage; expiry or invitation revocation prevents enrollment. Once redeemed, revoke the enrolled **device** to remove its access. Revoking only the invitation does not revoke its device.
 
-`share` also writes `invitation-link.txt`. Send its contents privately for the installed connector flow. `link` regenerates it from the existing invitation without contacting Runpod or waking the Pod. The default invitation site is `https://jkaarlehto.github.io/comfyui-hosted-connector/`; pass `--site-url https://your-site.example/path/` to save a different HTTPS site for this deployment. Links contain the same reusable credentials as `invitation.txt`. Anyone with a leaked link can access the shared ComfyUI workspace and incur GPU usage until their invitation is revoked; links are not single-use and do not expire automatically.
+The Pod fetches enrolled public keys every ten seconds. SSH checks the local five-minute lease on every new connection, including when the refresh process has failed. Device revocation blocks gateway wake requests immediately and new SSH connections within five minutes. Existing tunnels remain until closed or parked. These managed keys are never restored from persistent guest files. Owner, health and existing reusable tester keys remain separate.
+
+`share` also writes `invitation-link.txt`; `link` regenerates it without waking the Pod. The default site is `https://jkaarlehto.github.io/comfyui-hosted-connector/`; pass `--site-url https://your-site.example/path/` to save another HTTPS site. Links and files are private credentials and must never be published.
+
+Existing reusable invitations are listed separately and remain usable until explicitly revoked. Their revocation still requires the Pod to be running to remove its static SSH key and starter credential. Reissuing an existing reusable tester name through the gateway is refused: revoke it first or use another name. Successful revocation removes its locally generated invitation and SSH files; a failed remote update keeps the control record for retry. No existing access is automatically migrated.
 
 `hosted.py setup` applies the hosted template to the existing Pod; Runpod may restart it. Wait for startup before sharing. Each setup uses its own state directory. Keep that directory, its private keys and `.env` out of source control and sharing packages.
 
-The GitHub credential on the Pod is a read-only deploy key for the plugin repository. It is registered through the owner's existing GitHub CLI login and delivered through a Runpod secret. The owner's Runpod API key is held by the starter as a Runpod secret. Invitations contain a starter-only Runpod API key and an SSH key restricted to the ComfyUI port; they do not contain either owner credential.
+The GitHub credential on the Pod is a read-only deploy key registered through the owner's GitHub CLI login and delivered through a Runpod secret. The gateway's server-only key is also delivered through a Runpod secret and removed from the ComfyUI process environment. Neither owner credential is included in invitations or public assets.
 
 ## Configuration
 
@@ -109,7 +117,7 @@ Use `python deploy/runpod/runpod.py stop` to flush global storage and stop the P
 
 A stopped Pod does not reserve its GPU. During connection, the starter first tries to start the existing Pod. If that host has no free GPU, or the Pod is missing, it allocates a replacement using the existing template and global volume. Each request tries at most one GPU tier. After all eligible tiers are exhausted, it waits a minute before trying again. The connector's startup timeout still applies.
 
-Replacement creates a new Pod ID and SSH address. The starter retains the stopped source until it verifies the replacement's ownership, GPU price, configuration, storage mounts and running backend. A dedicated SSH key can only execute the fixed health check; it cannot forward ports or open a shell. The check requires prepared storage, the model-cache status endpoint, ComfyUI and the plugin's HTTP transport. Successful recovery removes the source, leaving one Pod. Existing invitations continue to use the same starter and restored guest keys.
+Replacement creates a new Pod ID and SSH address. The starter retains the stopped source until it verifies the replacement's ownership, GPU price, configuration, storage mounts and running backend. A dedicated SSH key can only execute the fixed health check; it cannot forward ports or open a shell. The check requires prepared storage, the model-cache status endpoint, ComfyUI and the plugin's HTTP transport. Successful recovery removes the source, leaving one Pod. Enrolled devices continue through the same gateway and starter; reusable invitations retain their restored guest keys.
 
 Use `python deploy/runpod/runpod.py replace` to queue recovery through the same starter. It reuses a healthy Pod, starts a stopped Pod when possible, and replaces it when capacity is unavailable. Owner commands resolve the current Pod by deployment identity.
 
@@ -121,17 +129,21 @@ Recovery progress is stored in the private GPU template's `NOTCH_RECOVERY` envir
 
 ## Tester connection
 
+The following describes the 1.1 connector source. An existing deployment needs the updated connector and page published, the gateway configured and the GPU template applied before one-time invitations work.
+
 The invitation page shows **Download and install** until the local connector answers, then **Connect**. Older connectors show **Update connector**. Open the downloaded installer from the browser's downloads menu, usually near the upper right, or from Downloads. The page checks every two seconds while visible and switches automatically after installation or removal. Click Connect and allow the browser to open the connector; it starts the Pod, establishes the local connection and opens the WebUI when ready.
 
-Connector 1.0.4 also reports progress to the invitation tab. The page shows server startup stages, model transfer and verification progress, errors and disconnection. Once connected, it provides **Open ComfyUI**, the local address and **Copy address**. Keep the connector open while working. If the browser does not open it, **Reconnect** appears after twenty seconds. Connection failures also offer Reconnect. Reloading the page requires clicking Connect again; the connector attaches the new page to an existing connection for the same invitation.
+Connector 1.1 reports progress to the invitation tab and shows **Saved workspaces** in its native window. A one-time invitation enrolls this computer and saves the workspace for later connections; select it and click Connect without reopening the invitation. The page shows server startup stages, model transfer and verification progress, errors and disconnection. Once connected, it provides **Open ComfyUI**, the local address and **Copy address**. Keep the connector open while working. If the browser does not open it, **Reconnect** appears after twenty seconds. Connection failures also offer Reconnect. Reloading the page requires clicking Connect again; the connector attaches the new page to an existing connection for the same invitation.
+
+Saved device credentials and SSH private keys are protected with Windows DPAPI for the current Windows account on this computer. Copying the workspace files or bookmark to another computer does not grant access; request a separate invitation there. **Remove** deletes the selected workspace's local credentials and closes its active connection. It does not revoke the device on the server. Ask the owner to revoke a lost or unwanted device; a new invitation is needed to add a removed workspace again.
 
 Installation includes a small background presence helper that starts at Windows sign-in. It reports connector availability and read-only connection status on `127.0.0.1:18187`; it cannot start a Pod or accept an invitation. Uninstall removes the startup entry and stops the helper. The browser may request permission to contact localhost. If permission is denied, the helper is stopped or that port is occupied, the page cannot detect it. Allow local access for the invitation site to enable detection. No browser setting or enterprise policy is changed by the installer.
 
-Presence requests contain only a fresh random nonce. When Connect is clicked, the page creates a separate random session token and passes it through the URI alongside the invitation. Status requests use that token and a fresh nonce; responses contain only connection state, fixed progress messages, model progress and the loopback address. The helper checks the configured page origin, loopback Host header and protocol registration. The page never treats a cookie or a past installation as proof that the connector is available. Invitation data stays in the URL fragment until the user clicks Connect; it is never sent to the hosting server, presence helper or browser storage. Keep invitation links private, including browser history and copied messages. Existing invitations remain reusable and revocable by the owner.
+Presence requests contain only a fresh random nonce. When Connect is clicked, the page creates a separate random session token and passes it through the URI alongside the invitation. Status requests use that token and a fresh nonce; responses contain only connection state, fixed progress messages, model progress and the loopback address. The helper checks the configured page origin, loopback Host header and protocol registration. The page never treats a cookie or a past installation as proof that the connector is available. Invitation data stays in the URL fragment until the user clicks Connect; it is never sent to GitHub Pages, the presence helper or browser storage. The connector submits a one-time enrollment token only to its designated gateway. Keep invitation links private, including browser history and copied messages. Older reusable invitations remain reusable and revocable by the owner.
 
 The script-only alternative remains available:
 
-Double-click `start_hosted_comfyui.bat`, paste the invitation and wait for the progress steps. The script saves the invitation as `HOSTED_COMFYUI_ACCESS` in a protected `.env` file beside the launcher and reuses it on later launches. Keep that file private. It connects through the starter and establishes an SSH tunnel bound only to loopback. The final window shows the WebUI link and the local address/port for Notch. Keep the launcher open while using the connection.
+Double-click `start_hosted_comfyui.bat`, paste the invitation and wait for the progress steps. For a one-time invitation, the script stores DPAPI-protected credentials under `workspaces/` beside its `.env` file. `HOSTED_COMFYUI_ACCESS` contains only a bookmark with the gateway and invitation ID, with no enrollment token or device secret. Later launches open that saved workspace. For an older reusable invitation, `.env` still contains the reusable invitation and must remain private. The script establishes an SSH tunnel bound only to loopback. The final window shows the WebUI link and the local address/port for Notch. Keep the launcher open while using the connection.
 
 For custom settings, run the PowerShell script with `-LocalPort` (default `18188`), `-StartupTimeoutMinutes` (default `15`) or `-EnvFile` (default `.env` beside the script).
 
@@ -139,7 +151,7 @@ The launcher needs Windows PowerShell and the Windows OpenSSH client. Python and
 
 ## Publishing the invitation page
 
-This repository contains the connector and deployment source under `deploy/runpod/`. Edit the page in `deploy/runpod/site/`; the generated public page and downloads live under `docs/`. GitHub Pages serves **main /docs**, while the existing Runpod starter handles wake requests. There is no new web backend. The private plugin, `.env`, `.runpod`, invitation files and keys must never enter Git or the Pages payload.
+This repository contains the connector and Runpod source under `deploy/runpod/`, and the access gateway under `deploy/gateway/`. Edit the page in `deploy/runpod/site/`; the generated public page and downloads live under `docs/`. GitHub Pages serves static files from **main /docs**. The separately deployed Cloudflare Worker/Durable Object handles one-time enrollment, device authorization and forwarding wake requests to the existing Runpod starter. Publishing the page does not deploy that backend. The private plugin, `.env`, `.runpod`, invitation files and keys must never enter Git or the Pages payload.
 
 After building the connector, stage explicit files, inspect the publication manifest, then publish:
 

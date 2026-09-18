@@ -18,7 +18,7 @@ namespace HostedComfyUI
     internal static class Presence
     {
         internal const int Port = 18187;
-        internal const string Version = "1.0.4";
+        internal const string Version = "1.1.0";
         private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string RunValue = "HostedComfyUIConnector";
         private static readonly string Name = @"Local\HostedComfyUI-Presence-" + WindowsIdentity.GetCurrent().User.Value;
@@ -262,7 +262,7 @@ namespace HostedComfyUI
                 status["nonce"] = session.Groups[2].Value; status["session"] = session.Groups[1].Value;
                 body = new JavaScriptSerializer().Serialize(status);
             }
-            else body = "{\"app\":\"hosted-comfyui-connector\",\"protocol\":1,\"version\":\"" + Version + "\",\"live_status\":1,\"nonce\":\"" + target.Groups[1].Value + "\"}";
+            else body = "{\"app\":\"hosted-comfyui-connector\",\"protocol\":1,\"version\":\"" + Version + "\",\"live_status\":1,\"enrollment\":2,\"nonce\":\"" + target.Groups[1].Value + "\"}";
             return "HTTP/1.1 200 OK\r\n" + cors + "Content-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: " + Encoding.UTF8.GetByteCount(body) + "\r\nConnection: close\r\n\r\n" + body;
         }
 

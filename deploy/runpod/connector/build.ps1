@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$SiteUrl = '',
-    [string]$Version = '1.0.4.0',
+    [string]$Version = '1.1.0.0',
     [string]$CertificateThumbprint = '',
     [string]$Publisher = 'CN=ComfyUI-Notch',
     [switch]$Package,
@@ -22,11 +22,13 @@ if (!(Test-Path -LiteralPath $csc)) { throw 'The .NET Framework 4 compiler is re
 $siteFile = Join-Path $output 'site.txt'
 [IO.File]::WriteAllText($siteFile, $SiteUrl.TrimEnd('/'), (New-Object Text.UTF8Encoding($false)))
 $launcher = Join-Path (Split-Path $PSScriptRoot -Parent) 'start_hosted_comfyui.ps1'
+$access = Join-Path (Split-Path $PSScriptRoot -Parent) 'hosted_access.ps1'
 $exe = Join-Path $output 'HostedComfyUIConnector.exe'
-$sources = @((Join-Path $PSScriptRoot 'Connector.cs'), (Join-Path $PSScriptRoot 'Presence.cs'), (Join-Path $PSScriptRoot 'LiveStatus.cs'))
+$sources = @((Join-Path $PSScriptRoot 'Connector.cs'), (Join-Path $PSScriptRoot 'Presence.cs'), (Join-Path $PSScriptRoot 'LiveStatus.cs'), (Join-Path $PSScriptRoot 'Workspace.cs'))
 $compilerArgs = @('/nologo', '/optimize+', '/platform:x64', '/reference:System.dll', '/reference:System.Core.dll',
     '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll',
-    "/resource:$launcher,launcher.ps1", "/resource:$siteFile,site.txt")
+    "/win32manifest:$(Join-Path $PSScriptRoot 'Connector.manifest')",
+    "/resource:$launcher,launcher.ps1", "/resource:$access,access.ps1", "/resource:$siteFile,site.txt")
 & $csc @compilerArgs /target:winexe "/out:$exe" @sources
 if ($LASTEXITCODE -ne 0) { throw 'Connector compilation failed.' }
 if ($Test) {
@@ -39,6 +41,7 @@ if ($Test) {
     [Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$tokens, [ref]$errors) | Out-Null
     if ($errors.Count) { throw ($errors | Out-String) }
     & (Join-Path $PSScriptRoot 'ProgressTests.ps1')
+    & (Join-Path $PSScriptRoot 'AccessTests.ps1')
 }
 $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
 $sdk = Get-ChildItem -LiteralPath $sdkRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Where-Object { Test-Path (Join-Path $_.FullName 'x64\makeappx.exe') } | Select-Object -First 1

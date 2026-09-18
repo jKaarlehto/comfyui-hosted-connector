@@ -282,6 +282,9 @@ def setup(args, key, state, state_file):
     bootstrap = bootstrap.replace(
         '_HEALTH_SCRIPT = ""', "_HEALTH_SCRIPT = " + repr(Path(__file__).with_name("health.py").read_text(encoding="utf-8"))
     )
+    bootstrap = bootstrap.replace(
+        '_SERVER_KEYS_SCRIPT = ""', "_SERVER_KEYS_SCRIPT = " + repr(Path(__file__).with_name("server_keys.py").read_text(encoding="utf-8"))
+    )
     template = {
         "name": args.name,
         "image": IMAGE,

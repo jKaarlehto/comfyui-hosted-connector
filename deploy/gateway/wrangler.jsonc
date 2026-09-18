@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "comfyui-hosted-gateway",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-11",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vars": {
+    "WORKSPACE_NAME": "ComfyUI Notch",
+    "RUNPOD_STARTER_ID": ""
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "WORKSPACE", "class_name": "Workspace" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Workspace"] }],
+  "observability": { "enabled": false }
+}

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import runpod as owner
 import recovery
+import gateway_owner
 
 BROKER_IMAGE = "python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea"
 SDK_VERSION = "1.12.0"
@@ -22,10 +23,14 @@ DEFAULT_SITE = "https://jkaarlehto.github.io/comfyui-hosted-connector/"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("setup", "share", "link", "list", "revoke"))
+    parser.add_argument(
+        "command", choices=("setup", "setup-gateway", "share", "link", "list", "revoke", "devices", "revoke-device")
+    )
     parser.add_argument("--state-dir", type=Path, default=Path(".runpod"))
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--guest", default="tester")
+    parser.add_argument("--device", help="Enrolled device ID to revoke")
+    parser.add_argument("--invite-days", type=int, default=7, choices=range(1, 31), metavar="1..30")
     parser.add_argument(
         "--starter-idle-seconds",
         type=int,
@@ -55,20 +60,42 @@ def main():
         args.starter_idle_seconds = state.get("hosted_config", {}).get("starter_idle_seconds", 60)
     if not 1 <= args.starter_idle_seconds <= 3600:
         parser.error("Starter idle time must be between 1 and 3600 seconds")
-    if args.command not in ("link", "list", "setup") and not state.get("pod_id"):
-        raise RuntimeError("Deploy a Pod with runpod.py first")
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,48}", args.guest):
         raise RuntimeError("Guest names must contain only letters, numbers, underscores or hyphens")
     if args.site_url:
         state["invitation_site"] = invitation_site(args.site_url)
         owner.save_state(state_file, state)
     state.setdefault("invitation_site", DEFAULT_SITE)
+    if args.command == "setup-gateway":
+        gateway_owner.setup(args, state, state_file)
+        return
+    if args.command in ("devices", "revoke-device"):
+        if not state.get("gateway"):
+            raise RuntimeError("Run hosted.py setup-gateway first")
+        if args.command == "devices":
+            gateway_owner.list_access(args, state, devices=True)
+        else:
+            gateway_owner.revoke_device(args, state)
+        return
+    if state.get("gateway") and args.command == "share":
+        folder = guest_folder(args)
+        gateway_owner.invite(args, state, state_file, folder)
+        copy_launchers(folder)
+        write_invitation_link(args, state)
+        print("Send the private invitation link to this tester.")
+        return
+    if args.command == "revoke" and args.guest in state.get("gateway_invites", {}):
+        gateway_owner.revoke_invite(args, state, state_file)
+        clear_guest_credentials(args)
+        return
     if args.command == "link":
         write_invitation_link(args, state)
         return
     if args.command == "list":
+        if state.get("gateway"):
+            gateway_owner.list_access(args, state)
         names = sorted(state.get("guests", {}))
-        print("Invited testers:" if names else "No tester invitations recorded.")
+        print("Reusable tester invitations:" if names else "No reusable tester invitations recorded.")
         for name in names:
             pending = " (revocation pending)" if state["guests"][name].get("revoking") else ""
             print(" ", name + pending)
@@ -152,10 +179,12 @@ def setup(args, key, state, state_file):
         prefix + "_health",
         base64.b64encode(health_key.read_bytes()).decode(),
     )
-    state["hosted_env"] = {
-        "NOTCH_SSH_HOST_KEY_B64": "{{ RUNPOD_SECRET_" + host_secret + " }}",
-        "NOTCH_HEALTH_PUBLIC_KEY": " ".join(health_key.with_suffix(".pub").read_text().split()[:2]),
-    }
+    state.setdefault("hosted_env", {}).update(
+        {
+            "NOTCH_SSH_HOST_KEY_B64": "{{ RUNPOD_SECRET_" + host_secret + " }}",
+            "NOTCH_HEALTH_PUBLIC_KEY": " ".join(health_key.with_suffix(".pub").read_text().split()[:2]),
+        }
+    )
     owner.save_state(state_file, state)
     body = {
         "name": state["config"]["name"] + " starter",
@@ -276,19 +305,21 @@ def invite(args, key, state, state_file):
         raise RuntimeError("Invitation file is missing; revoke this tester and create a new invitation")
     owner.private_file(invitation)
     update_guests(args, key, state)
-    for name in ("start_hosted_comfyui.bat", "start_hosted_comfyui.ps1"):
-        (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
+    copy_launchers(folder)
     print("Tester launcher:", folder / "start_hosted_comfyui.bat")
-    print("Send the two launcher files and invitation.txt privately to this tester.")
+    print("Send the launcher files and invitation.txt privately to this tester.")
     print("The invitation contains a dedicated tunnel key and a starter-only API key.")
     if state.get("invitation_site"):
         write_invitation_link(args, state)
 
 
 def write_invitation_link(args, state):
-    if args.guest not in state.get("guests", {}):
+    record = state.get("gateway_invites", {}).get(args.guest) or state.get("guests", {}).get(args.guest)
+    if record is None:
         raise RuntimeError("Create this tester's invitation with share first")
-    if state["guests"][args.guest].get("revoking"):
+    if record.get("revoked"):
+        raise RuntimeError("This invitation was revoked; create a new invitation with share")
+    if record.get("revoking"):
         raise RuntimeError("This tester's revocation is pending; retry revoke")
     site = invitation_site(state.get("invitation_site", ""))
     folder = guest_folder(args)
@@ -303,6 +334,11 @@ def write_invitation_link(args, state):
     target.write_text(site + "#" + token + "\n", encoding="utf-8")
     print("Private invitation link saved to:", target)
     print("Send its contents privately. The link grants the same access as invitation.txt.")
+
+
+def copy_launchers(folder):
+    for name in ("start_hosted_comfyui.bat", "start_hosted_comfyui.ps1", "hosted_access.ps1"):
+        (folder / name).write_bytes(Path(__file__).with_name(name).read_bytes())
 
 
 def invitation_site(value):

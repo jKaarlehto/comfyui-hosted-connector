@@ -2,12 +2,15 @@
 * { box-sizing: border-box; }
 body { margin: 0; }
 main { width: min(100% - 40px, 560px); margin: 76px auto; }
-h1 { font-size: 1.85rem; font-weight: 600; letter-spacing: -.03em; line-height: 1.2; margin: 0 0 20px; }
+.brand { display: flex; align-items: center; gap: 10px; margin-bottom: 38px; font-size: 1.25rem; letter-spacing: -.025em; }
+.brand strong { font-weight: 650; }
+.brand-mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 5px; background: #303bc7; color: white; font-weight: 700; font-size: 1.1rem; }
+h1 { font-size: 1.7rem; font-weight: 600; letter-spacing: -.03em; line-height: 1.2; margin: 0 0 16px; }
 p { margin: 14px 0 22px; }
 a { color: #284ba1; text-underline-offset: 3px; }
 .actions { display: flex; flex-wrap: wrap; gap: 12px; }
 .button { display: inline-block; padding: 9px 22px; border-radius: 5px; font: inherit; font-weight: 550; cursor: pointer; text-decoration: none; }
-.primary { border: 1px solid #303d56; background: #303d56; color: white; }
+.primary { border: 1px solid #303bc7; background: #303bc7; color: white; }
 .button:focus-visible, a:focus-visible { outline: 2px solid #466dc1; outline-offset: 4px; }
 .button:disabled, a[aria-disabled="true"] { opacity: .5; cursor: default; }
 .note, .footnote { color: #626870; font-size: .9rem; }
@@ -19,7 +22,7 @@ code { font-size: .95rem; overflow-wrap: anywhere; }
 .copy:focus-visible { outline: 2px solid #466dc1; outline-offset: 4px; }
 .model p { margin: 0 0 6px; }
 .filename { font-size: .85rem; overflow-wrap: anywhere; }
-progress { width: 100%; height: 7px; accent-color: #303d56; }
+progress { width: 100%; height: 7px; accent-color: #303bc7; }
 .footnote { margin-bottom: 12px; }
 ol { padding-left: 22px; margin: 28px 0; }
 li { padding: 3px 0; }

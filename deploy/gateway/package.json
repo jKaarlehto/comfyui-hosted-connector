@@ -1,0 +1,14 @@
+{
+  "name": "comfyui-hosted-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "miniflare": "4.20260611.0",
+    "wrangler": "4.100.0"
+  }
+}

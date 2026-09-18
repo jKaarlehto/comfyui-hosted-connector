@@ -16,6 +16,9 @@ namespace HostedComfyUI
         private readonly List<string> sessions = new List<string>();
         private string state = "starting", message = "Starting hosted ComfyUI";
         private ModelProgress model;
+        private bool enrolled;
+        internal string State { get { return state; } }
+        internal string Message { get { return message; } }
         private static readonly string[] Steps = {
             "Checking for updates", "Downloading Notch plugin", "Starting connection services", "Updating ComfyUI",
             "Installing ComfyUI dependencies", "Preparing saved files", "Starting ComfyUI", "Starting hosted ComfyUI",
@@ -29,6 +32,7 @@ namespace HostedComfyUI
             "Retiring a duplicate recovery allocation", "The replacement GPU became unavailable; trying another",
             "Stopping the original Pod before completing recovery",
             "Checking Windows SSH client", "Loading your tester invitation", "Waking hosted ComfyUI",
+            "Accepting invitation", "Opening saved workspace", "Saving workspace", "Waiting for workspace access",
             "Opening the local connection", "Waiting for ComfyUI and the plugin to finish loading"
         };
         private static readonly string[] Failures = {
@@ -39,7 +43,16 @@ namespace HostedComfyUI
             "ComfyUI failed to start; the owner must check the startup log",
             "This invitation has expired or was revoked. Ask the owner for a new code.",
             "Windows OpenSSH Client is missing. Install it under Settings > Optional features, then reconnect.",
-            "The server rejected your tunnel key. Ask the owner to renew your invitation."
+            "The server rejected your tunnel key. Ask the owner to renew your invitation.",
+            "Workspace access has been revoked or is invalid. Ask the owner for a new invitation.",
+            "This invitation has already been used on another device. Ask the owner for a new invitation.",
+            "This invitation has expired. Ask the owner for a new invitation.",
+            "This workspace is not saved on this computer. Open a new invitation from the owner.",
+            "This invitation has not finished enrolling. Open the original invitation to try again.",
+            "This workspace is already being opened. Try again shortly.",
+            "The workspace is already starting. Try again shortly.",
+            "The workspace service is unavailable. Try again shortly.",
+            "Could not open the saved workspace credentials for this Windows account."
         };
 
         internal LiveStatus(string directory) { root = directory; }
@@ -56,7 +69,7 @@ namespace HostedComfyUI
         internal void Clear() { Set("disconnected", "Connection closed"); sessions.Clear(); }
         internal void Start(string token, bool replace)
         {
-            if (replace) Clear();
+            if (replace) { Clear(); enrolled = false; }
             Set("starting", "Starting hosted ComfyUI");
             Add(token);
         }
@@ -67,6 +80,7 @@ namespace HostedComfyUI
             Publish();
         }
         internal void SetModel(ModelProgress value) { model = value.Phase == "idle" ? null : value; Publish(); }
+        internal void Enrolled() { enrolled = true; Publish(); }
         internal void Ended() { if (state != "error") Set("disconnected", "Connection ended. Reconnect to try again."); }
         internal void Heartbeat() { if (state == "starting" || state == "connected") Publish(); }
 
@@ -107,6 +121,7 @@ namespace HostedComfyUI
                         { "updated_at", DateTime.UtcNow.Ticks }
                     };
                     if (model != null && state == "connected") value["model"] = ModelFields(model);
+                    if (enrolled) value["enrolled"] = true;
                     byte[] data = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(value));
                     foreach (string token in sessions) Write(folder, token, data);
                 }
@@ -166,6 +181,8 @@ namespace HostedComfyUI
                     (age > TimeSpan.TicksPerSecond * 15 || !Alive((int)pid, (long)started))) state = "disconnected";
                 var result = new Dictionary<string, object> { { "state", state }, { "message", SafeMessage(state, (string)rawMessage) },
                     { "address", state == "connected" ? Address : "" } };
+                object saved;
+                if (fields.TryGetValue("enrolled", out saved) && saved is bool && (bool)saved) result["enrolled"] = true;
                 if (state == "connected" && fields.TryGetValue("model", out rawModel))
                 {
                     ModelProgress progress;

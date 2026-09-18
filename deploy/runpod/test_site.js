@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const source = fs.readFileSync(new URL("./site/connect.js", import.meta.url), "utf8");
 const html = fs.readFileSync(new URL("./site/index.html", import.meta.url), "utf8");
-const functions = { atob, Uint8Array, TextDecoder, URL };
+const functions = { atob, btoa, Uint8Array, TextDecoder, URL };
 vm.runInNewContext(source, functions);
 const { invitationToken, localAddress, sessionStatus, modelStatus } = functions;
 const invitation = {
@@ -43,13 +43,14 @@ function page(fragment = "#" + canonical, markup = html, query = "") {
   const timers = new Map();
   const navigations = [];
   const redirects = [];
+  const replacements = [];
   let timerId = 0;
   let nonceId = 0;
   let href = "https://example.test/connect/" + query + fragment;
   const location = { hash: fragment, replace(value) { redirects.push(value); } };
-  Object.defineProperty(location, "href", { get() { return href; }, set(value) { href = value; navigations.push(value); } });
+  Object.defineProperty(location, "href", { get() { return href; }, set(value) { if (value.startsWith("https:")) href = value; navigations.push(value); } });
   const result = {
-    elements, requests, events, documentEvents, timers, navigations, redirects,
+    elements, requests, events, documentEvents, timers, navigations, redirects, replacements,
     now: 100000, clipboard: [],
     response: async () => { throw new Error("No connector"); },
     release: { ok: true, json: async () => ({ installerAvailable: true }) }
@@ -60,7 +61,8 @@ function page(fragment = "#" + canonical, markup = html, query = "") {
     addEventListener(type, action) { documentEvents[type] = action; }
   };
   const sandbox = {
-    document, window: { location, addEventListener(type, action) { events[type] = action; } },
+    document, window: { location, addEventListener(type, action) { events[type] = action; },
+      history: { replaceState(state, title, value) { replacements.push(value); href = value; location.hash = new URL(value).hash; } } },
     fetch(url, options) {
       requests.push({ url, options });
       return url === "downloads/release.json" ? Promise.resolve(result.release) : result.response(url, options);
@@ -70,7 +72,7 @@ function page(fragment = "#" + canonical, markup = html, query = "") {
     clearTimeout(id) { timers.delete(id); },
     Date: { now: () => result.now },
     navigator: { clipboard: { async writeText(value) { result.clipboard.push(value); } } },
-    AbortController, URL, atob, Uint8Array, TextDecoder
+    AbortController, URL, atob, btoa, Uint8Array, TextDecoder
   };
   Object.defineProperty(sandbox, "localStorage", { get() { throw new Error("Installation must not use browser storage"); } });
   vm.runInNewContext(source, sandbox);
@@ -185,9 +187,9 @@ assert.equal(cached.requests.length, 0);
 assert.equal(cached.redirects.length, 1);
 const refresh = new URL(cached.redirects[0]);
 assert.equal(refresh.origin, "https://example.test");
-assert.equal(refresh.search, "?page=3");
+assert.equal(refresh.search, "?page=4");
 assert.equal(refresh.hash, "#" + canonical);
-const stillCached = page("#" + canonical, oldMarkup, "?page=3");
+const stillCached = page("#" + canonical, oldMarkup, "?page=4");
 assert.equal(stillCached.redirects.length, 0, "Never create a reload loop");
 assert.match(stillCached.elements.get("status").textContent, /out of date/);
 
@@ -325,4 +327,43 @@ for (const invalid of [null, {}, { phase: "other" }, { phase: "downloading", fil
 assert.equal(modelStatus({ phase: "downloading", filename: "a\u202eb", completed_bytes: 0, total_bytes: 0 }).filename, "ab");
 assert.equal(modelStatus({ phase: "downloading", filename: "m".repeat(1024), completed_bytes: 0, total_bytes: 0 }).filename.length, 1024);
 assert.equal(modelStatus({ phase: "downloading", filename: "m".repeat(1025), completed_bytes: 0, total_bytes: 0 }), null);
+
+const enrollmentInvite = { version: 2, gateway: "https://fixture.example.workers.dev", invite_id: "1".repeat(32), token: "a".repeat(64) };
+const encodeInvite = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+const enrollmentToken = encodeInvite(enrollmentInvite);
+assert.equal(invitationToken("#" + enrollmentToken), enrollmentToken);
+for (const invalid of [{ version: "2" }, { gateway: "http://fixture.example.workers.dev" }, { gateway: "https://fixture.example.workers.dev/" },
+  { gateway: "https://fixture.example.workers.dev:443" }, { gateway: "https://fixture.example.workers.dev.evil.test" },
+  { gateway: "https://user@fixture.example.workers.dev" }, { gateway: "https://127.0.0.1" }, { token: "a".repeat(64) + "\n" },
+  { invite_id: "1".repeat(32) + "\n" }, { token: "short" }, { key: "unexpected" }]) {
+  assert.throws(() => invitationToken("#" + encodeInvite({ ...enrollmentInvite, ...invalid })));
+}
+const enrolling = page("#" + enrollmentToken);
+await flush();
+enrolling.response = async url => answer(url);
+await poll(enrolling);
+assert.equal(enrolling.elements.get("download").textContent, "Update connector");
+let enrollmentStatus = { state: "starting", message: "Accepting invitation", address: "", enrolled: false };
+enrolling.response = async url => answer(url, { enrollment: 2, ...enrollmentStatus });
+await poll(enrolling);
+assert.equal(enrolling.elements.get("connect").hidden, false);
+enrolling.elements.get("connect").events.click();
+await poll(enrolling);
+assert.equal(enrolling.replacements.length, 0, "Opening page/connector does not consume the invitation");
+enrollmentStatus = { ...enrollmentStatus, enrolled: true, message: "Waking hosted ComfyUI" };
+await poll(enrolling);
+assert.equal(enrolling.replacements.length, 1);
+const bookmarkUrl = new URL(enrolling.replacements[0]);
+assert.equal(bookmarkUrl.origin, "https://example.test");
+const savedBookmark = JSON.parse(Buffer.from(bookmarkUrl.hash.substring(1), "base64url"));
+assert.equal(savedBookmark.token, "");
+assert.equal(savedBookmark.invite_id, enrollmentInvite.invite_id);
+assert.equal(savedBookmark.gateway, enrollmentInvite.gateway);
+assert.equal(invitationToken(bookmarkUrl.hash), encodeInvite(savedBookmark));
+await poll(enrolling);
+assert.equal(enrolling.replacements.length, 1, "Consumed token is removed only once");
+for (const request of enrolling.requests) {
+  assert.ok(!JSON.stringify(request).includes(enrollmentToken));
+  assert.ok(!JSON.stringify(request).includes(enrollmentInvite.token));
+}
 console.log("Invitation parsing, live detection/status, progress, reconnect, security, timeout and cached-page tests passed.");

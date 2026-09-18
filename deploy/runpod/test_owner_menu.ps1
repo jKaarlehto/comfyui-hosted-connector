@@ -79,6 +79,15 @@ try {
     Assert-True (($script:Calls -join ',') -eq 'hosted.py:list') 'Invitation listing must use the offline helper command.'
 
     $script:Calls.Clear()
+    $script:Answers.Enqueue('y')
+    & $invokeAction 'A'
+    & $invokeAction 'D'
+    $script:Answers.Enqueue(('a' * 32))
+    $script:Answers.Enqueue('y')
+    & $invokeAction 'R'
+    Assert-True (($script:Calls -join ',') -eq ('hosted.py:setup-gateway,hosted.py:devices,hosted.py:devices,hosted.py:revoke-device|--device|' + ('a' * 32))) 'Gateway menu routing failed.'
+
+    $script:Calls.Clear()
     function Invoke-OwnerAction { throw 'simulated action failure' }
     $script:Answers.Enqueue('3')
     $script:Answers.Enqueue('')

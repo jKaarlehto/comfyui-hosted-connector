@@ -1,12 +1,15 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 using HostedComfyUI;
 
 internal static class ConnectorTests
@@ -23,6 +26,7 @@ internal static class ConnectorTests
     {
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(fields)));
     }
+    [STAThread]
     private static int Main()
     {
         try
@@ -70,6 +74,8 @@ internal static class ConnectorTests
             TestPresence();
             TestModelProgress();
             TestLiveStatus();
+            TestEnrollment();
+            TestWorkspacesAndForm();
             using (var rejectedInstall = Process.Start(new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "HostedComfyUIConnector.exe"), "--install unexpected")
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true }))
             {
@@ -168,7 +174,7 @@ internal static class ConnectorTests
         Check(!response.Contains("Access-Control-Allow-Credentials"));
         Check(response.Contains("Cache-Control: no-store\r\n"));
         var fields = new JavaScriptSerializer().DeserializeObject(response.Substring(response.IndexOf("\r\n\r\n") + 4)) as Dictionary<string, object>;
-        Check(fields.Count == 5 && (int)fields["live_status"] == 1 && (string)fields["app"] == "hosted-comfyui-connector" && (int)fields["protocol"] == 1 &&
+        Check(fields.Count == 6 && (int)fields["enrollment"] == 2 && (int)fields["live_status"] == 1 && (string)fields["app"] == "hosted-comfyui-connector" && (int)fields["protocol"] == 1 &&
             (string)fields["version"] == Presence.Version && (string)fields["nonce"] == nonce);
         Check(Presence.Response(request, origin, false).StartsWith("HTTP/1.1 404"));
         Check(Presence.Response(request, null, true).StartsWith("HTTP/1.1 403"));
@@ -246,6 +252,145 @@ internal static class ConnectorTests
         return (Dictionary<string, object>)new JavaScriptSerializer().DeserializeObject(text);
     }
 
+    private static void TestEnrollment()
+    {
+        var value = new Dictionary<string, object> { { "version", 2 }, { "gateway", "https://workspace.example.workers.dev" },
+            { "invite_id", new String('a', 32) }, { "token", new String('b', 64) } };
+        string original = Invitation.Normalize(Encode(value));
+        Check(Invitation.DecodeUri("hosted-comfyui://connect#" + original) == original);
+        Reject(delegate { Invitation.SavedBookmark(original); });
+        value["token"] = "";
+        string bookmark = Invitation.SavedBookmark(Encode(value));
+        Check(Invitation.DecodeUri("hosted-comfyui://connect#" + bookmark) == bookmark);
+        Check(Invitation.Identity(original) == Invitation.Identity(bookmark));
+        foreach (object invalid in new object[] { new String('B', 64), "short", 12, null, new String('a', 65) })
+        {
+            value["token"] = invalid;
+            Reject(delegate { Invitation.Normalize(Encode(value)); });
+        }
+        value["token"] = new String('b', 64);
+        foreach (object invalid in new object[] { "../test", new String('A', 32), new String('a', 31), 12, null })
+        {
+            value["invite_id"] = invalid;
+            Reject(delegate { Invitation.Normalize(Encode(value)); });
+        }
+        value["invite_id"] = new String('a', 32);
+        foreach (string invalid in new[] { "http://workspace.example.workers.dev", "https://localhost", "https://127.0.0.1", "https://[::1]",
+            "https://10.0.0.1", "https://example.com", "https://workspace.example.workers.dev.evil.example", "https://user@workspace.example.workers.dev",
+            "https://workspace.example.workers.dev:443", "https://workspace.example.workers.dev:8188", "https://workspace.example.workers.dev/",
+            "https://workspace.example.workers.dev/path", "https://workspace.example.workers.dev?key=x", "https://workspace.example.workers.dev#key",
+            "https://workspace.example.workers.dev\r\n", "https://Workspace.example.workers.dev", "https://a..workers.dev", "https://-a.example.workers.dev" })
+        {
+            value["gateway"] = invalid;
+            Reject(delegate { Invitation.Normalize(Encode(value)); });
+        }
+        value["gateway"] = "https://workspace.example.workers.dev";
+        value["extra"] = "command";
+        Reject(delegate { Invitation.Normalize(Encode(value)); });
+        value.Remove("extra"); value.Remove("token");
+        Reject(delegate { Invitation.Normalize(Encode(value)); });
+    }
+
+    private static void TestWorkspacesAndForm()
+    {
+        string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "workspaces-" + Guid.NewGuid().ToString("N"));
+        var descriptor = new Dictionary<string, object> { { "version", 2 }, { "gateway", "https://workspace.example.workers.dev" },
+            { "invite_id", new String('a', 32) }, { "device_id", new String('c', 32) }, { "name", "My ComfyUI workspace" } };
+        var serializer = new JavaScriptSerializer();
+        try
+        {
+            Workspace item = Workspace.Parse(serializer.Serialize(descriptor));
+            Check(item.Name == "My ComfyUI workspace" && item.Id.Length == 64 && Invitation.Identity(item.Bookmark) == item.Identity);
+            Check(Invitation.SavedBookmark(item.Bookmark) == item.Bookmark && !Encoding.UTF8.GetString(Convert.FromBase64String(item.Bookmark)).Contains("device_id"));
+            foreach (object invalid in new object[] { "", " leading space", "trailing space ", "bad\r\nname", new String('x', 81), 12, null })
+            {
+                descriptor["name"] = invalid;
+                Reject(delegate { Workspace.Parse(serializer.Serialize(descriptor)); });
+            }
+            descriptor["name"] = "My ComfyUI workspace";
+            descriptor["device_id"] = "../../escape";
+            Reject(delegate { Workspace.Parse(serializer.Serialize(descriptor)); });
+            descriptor["device_id"] = new String('c', 32);
+            descriptor["token"] = "should-not-be-here";
+            Reject(delegate { Workspace.Parse(serializer.Serialize(descriptor)); });
+            descriptor.Remove("token");
+            string folder = Path.Combine(root, "workspaces");
+            Storage.ProtectDirectory(folder);
+            File.WriteAllText(Path.Combine(folder, item.Id + ".json"), serializer.Serialize(descriptor));
+            Check(Workspace.Load(root).Count == 0);
+            File.WriteAllBytes(Path.Combine(folder, item.Id + ".dat"), new byte[] { 1 });
+            Check(Workspace.Load(root).Count == 1);
+            File.WriteAllText(Path.Combine(folder, "wrong-name.json"), serializer.Serialize(descriptor));
+            File.WriteAllText(Path.Combine(folder, "broken.json"), "{");
+            Check(Workspace.Load(root).Count == 1);
+            Application.EnableVisualStyles();
+            using (var form = new ConnectorForm(root))
+            {
+                form.StartPosition = FormStartPosition.Manual; form.Location = new Point(-32000, -32000); form.ShowInTaskbar = false; form.Opacity = 0;
+                form.Show(); Application.DoEvents();
+                var list = (ListBox)form.Controls.Find("savedWorkspaces", true)[0];
+                var connect = (Button)form.Controls.Find("connect", true)[0];
+                var close = (Button)form.Controls.Find("disconnect", true)[0];
+                var open = (Button)form.Controls.Find("openComfyUI", true)[0];
+                var details = (Button)form.Controls.Find("details", true)[0];
+                var log = (TextBox)form.Controls.Find("connectionLog", true)[0];
+                Check(form.Text.Contains("ComfyUI Notch") && list.Items.Count == 1 && connect.Enabled && !open.Enabled && !close.Enabled);
+                Check(!log.Visible && details.Text == "Show details");
+                typeof(ConnectorForm).GetField("activeInvitation", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(form, item.Bookmark);
+                form.SetPhase("starting", "Accepting invitation");
+                Check(!connect.Enabled && close.Enabled && !open.Enabled && form.Controls.Find("summary", true)[0].Text == item.Name + Environment.NewLine + "Accepting invitation");
+                form.SetPhase("connected", "Your workspace is ready. Keep this window open while connected.");
+                Check(open.Enabled && close.Enabled && !connect.Enabled);
+                descriptor["name"] = "Another workspace"; descriptor["invite_id"] = new String('b', 32);
+                list.Items.Add(Workspace.Parse(serializer.Serialize(descriptor))); list.SelectedIndex = 1;
+                Check(connect.Enabled && connect.Text == "Connect" && form.Controls.Find("summary", true)[0].Text.StartsWith(item.Name + Environment.NewLine));
+                list.SelectedIndex = 0; list.Items.RemoveAt(1);
+                Check(!connect.Enabled);
+                using (var bitmap = new Bitmap(form.Width, form.Height))
+                {
+                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                    bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "connector-preview.png"));
+                }
+                int beforeModel = form.ClientSize.Height;
+                ModelProgress download;
+                Check(ModelProgress.TryDecode(Encode(new Dictionary<string, object> { { "phase", "downloading" }, { "filename", "models/checkpoints/example.safetensors" },
+                    { "completed_bytes", 5368709120L }, { "total_bytes", 10737418240L } }), out download));
+                form.ShowModel(download); Application.DoEvents();
+                Check(form.ClientSize.Height > beforeModel && details.Bottom < details.Parent.Height);
+                using (var bitmap = new Bitmap(form.Width, form.Height))
+                {
+                    form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+                    bitmap.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "connector-model-preview.png"));
+                }
+                Check(ModelProgress.TryDecode(Encode(new Dictionary<string, object> { { "phase", "idle" }, { "filename", "" }, { "completed_bytes", 0 }, { "total_bytes", 0 } }), out download));
+                form.ShowModel(download);
+                Check(form.ClientSize.Height == beforeModel);
+                int height = form.ClientSize.Height;
+                details.PerformClick(); Application.DoEvents();
+                Check(log.Visible && details.Text == "Hide details" && form.ClientSize.Height == height + 160);
+                for (int i = 0; i < 100; i++) form.Append(new String('x', 500));
+                Check(log.TextLength <= 24000 && log.TextLength > 500);
+                details.PerformClick(); Application.DoEvents();
+                Check(!log.Visible && form.ClientSize.Height == height);
+                close.PerformClick();
+                Check(!open.Enabled && !close.Enabled && connect.Enabled);
+                form.ClientSize = new Size(1000, 620); Application.DoEvents();
+                Check(form.Controls.Find("address", true)[0].Width > 500);
+                form.Close();
+            }
+            using (var locked = new FileStream(Path.Combine(folder, item.Id + ".dat.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                bool rejected = false;
+                try { item.Remove(root); } catch (IOException) { rejected = true; }
+                Check(rejected && Workspace.Load(root).Count == 1);
+            }
+            item.Remove(root);
+            Check(Workspace.Load(root).Count == 0 && !File.Exists(Path.Combine(folder, item.Id + ".dat")) && !File.Exists(Path.Combine(folder, item.Id + ".json")));
+            Check(File.Exists(Path.Combine(folder, "wrong-name.json")));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     private static void TestLiveStatus()
     {
         string root = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "live-status-" + Guid.NewGuid().ToString("N"));
@@ -287,14 +432,24 @@ internal static class ConnectorTests
             live.Ended();
             Check((string)LiveStatus.Read(root, first)["state"] == "error" && !(string.IsNullOrEmpty((string)LiveStatus.Read(root, first)["message"])));
             Check(!new JavaScriptSerializer().Serialize(LiveStatus.Read(root, first)).Contains("private-key-secret"));
+            foreach (string error in new[] { "This invitation has already been used on another device. Ask the owner for a new invitation.",
+                "This invitation has expired. Ask the owner for a new invitation.",
+                "This workspace is not saved on this computer. Open a new invitation from the owner." })
+            {
+                live.Observe("Connection failed: " + error);
+                Check((string)LiveStatus.Read(root, first)["message"] == error);
+            }
             live.Start(first, false);
             Check((string)LiveStatus.Read(root, second)["state"] == "starting");
             live.Set("connected", "");
+            live.Enrolled();
+            Check((bool)LiveStatus.Read(root, first)["enrolled"]);
             live.Ended();
             live.Start(third, true);
             live.Set("connected", "");
             Check((string)LiveStatus.Read(root, first)["state"] == "disconnected" && (string)LiveStatus.Read(root, second)["state"] == "disconnected");
             Check((string)LiveStatus.Read(root, third)["state"] == "connected");
+            Check(!LiveStatus.Read(root, third).ContainsKey("enrolled") && (bool)LiveStatus.Read(root, first)["enrolled"]);
 
             string path = Path.Combine(root, "page-sessions", third + ".json");
             string valid = File.ReadAllText(path);
@@ -324,8 +479,13 @@ internal static class ConnectorTests
             Exception failure = null;
             var writer = new Thread(delegate() { try { for (int i = 0; i < 20; i++) live.Heartbeat(); } catch (Exception error) { failure = error; } });
             writer.Start();
-            for (int i = 0; i < 30; i++) Check((string)LiveStatus.Read(root, third)["state"] == "connected");
+            for (int i = 0; i < 30; i++)
+            {
+                var concurrent = LiveStatus.Read(root, third);
+                Check(concurrent == null || (string)concurrent["state"] == "connected");
+            }
             Check(writer.Join(5000) && failure == null);
+            Check((string)LiveStatus.Read(root, third)["state"] == "connected");
             live.Clear();
             Check((string)LiveStatus.Read(root, third)["state"] == "disconnected");
         }

@@ -2,7 +2,7 @@
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" IgnorableNamespaces="uap uap3 rescap">
   <Identity Name="HostedComfyUIConnector" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Hosted ComfyUI Connector</DisplayName>
+    <DisplayName>ComfyUI Notch Connector</DisplayName>
     <PublisherDisplayName>ComfyUI-Notch</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -10,8 +10,8 @@
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
     <Application Id="Connector" Executable="HostedComfyUIConnector.exe" EntryPoint="Windows.FullTrustApplication">
-      <uap:VisualElements DisplayName="Hosted ComfyUI Connector" Description="Connect to an invited hosted ComfyUI server" BackgroundColor="#202020" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
-      <Extensions><uap3:Extension Category="windows.protocol"><uap3:Protocol Name="hosted-comfyui" Parameters="&quot;%1&quot;"><uap:DisplayName>Hosted ComfyUI invitation</uap:DisplayName></uap3:Protocol></uap3:Extension></Extensions>
+      <uap:VisualElements DisplayName="ComfyUI Notch Connector" Description="Connect to your ComfyUI Notch workspaces" BackgroundColor="#303BC7" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions><uap3:Extension Category="windows.protocol"><uap3:Protocol Name="hosted-comfyui" Parameters="&quot;%1&quot;"><uap:DisplayName>ComfyUI Notch invitation</uap:DisplayName></uap3:Protocol></uap3:Extension></Extensions>
     </Application>
   </Applications>
   <Capabilities><rescap:Capability Name="runFullTrust" /></Capabilities>

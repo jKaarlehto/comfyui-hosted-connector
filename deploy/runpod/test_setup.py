@@ -30,6 +30,7 @@ class SetupTests(unittest.TestCase):
                 "template_id": "template",
                 "global_volume_id": "volume",
                 "broker_id": "starter",
+                "hosted_env": {"NOTCH_GATEWAY_URL": "https://test.account.workers.dev", "NOTCH_GATEWAY_SERVER_KEY": "{{ RUNPOD_SECRET_gateway }}"},
                 "config": {"storage": "global", "gpu": "NVIDIA PRO", "name": "Comfy", "comfy_port": 8188},
             }
 
@@ -56,6 +57,7 @@ class SetupTests(unittest.TestCase):
             self.assertTrue(body["env"]["NOTCH_HEALTH_KEY_B64"].startswith("{{ RUNPOD_SECRET_"))
             self.assertNotIn("owner-private", json.dumps(body))
             self.assertIn("NOTCH_HEALTH_PUBLIC_KEY", state["hosted_env"])
+            self.assertEqual(state["hosted_env"]["NOTCH_GATEWAY_SERVER_KEY"], "{{ RUNPOD_SECRET_gateway }}")
             self.assertNotIn("NOTCH_HEALTH_KEY_B64", state["hosted_env"])
             self.assertEqual(secrets.call_count, 3)
             resolve.assert_not_called()
@@ -104,6 +106,7 @@ class SetupTests(unittest.TestCase):
             self.assertIn("Report hosted workspace readiness", payload["args"])
             self.assertIn("--mode prepare || exit $?", payload["args"])
             self.assertIn("/hosted_comfyui/storage", payload["args"])
+            self.assertIn("Leased SSH authorization", payload["args"])
 
 
 if __name__ == "__main__":
