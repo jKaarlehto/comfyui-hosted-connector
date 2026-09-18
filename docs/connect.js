@@ -8,11 +8,18 @@ function invitationToken(fragment) {
   const normalized = token.replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/, "");
   const bytes = Uint8Array.from(atob(normalized), (character) => character.charCodeAt(0));
   const invitation = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-  if (!invitation || Object.keys(invitation).sort().join(",") !== "endpoint,key,ssh_key,version" ||
-      invitation.version !== 1 || typeof invitation.endpoint !== "string" ||
-      !/^[a-z0-9]{8,40}$/.test(invitation.endpoint) || typeof invitation.key !== "string" ||
-      !/^[A-Za-z0-9_-]{20,200}$/.test(invitation.key) || typeof invitation.ssh_key !== "string" ||
-      !/^-----BEGIN OPENSSH PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END OPENSSH PRIVATE KEY-----\r?\n?$/.test(invitation.ssh_key)) {
+  const legacy = invitation && Object.keys(invitation).sort().join(",") === "endpoint,key,ssh_key,version" &&
+      invitation.version === 1 && typeof invitation.endpoint === "string" &&
+      /^[a-z0-9]{8,40}$/.test(invitation.endpoint) && typeof invitation.key === "string" &&
+      /^[A-Za-z0-9_-]{20,200}$/.test(invitation.key) && typeof invitation.ssh_key === "string" &&
+      /^-----BEGIN OPENSSH PRIVATE KEY-----\r?\n[A-Za-z0-9+/=\r\n]+-----END OPENSSH PRIVATE KEY-----\r?\n?$/.test(invitation.ssh_key);
+  const enrollment = invitation && Object.keys(invitation).sort().join(",") === "gateway,invite_id,token,version" &&
+      invitation.version === 2 && typeof invitation.gateway === "string" &&
+      /^https:\/\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.workers\.dev$/.test(invitation.gateway) &&
+      invitation.gateway === invitation.gateway.trim() && typeof invitation.invite_id === "string" &&
+      invitation.invite_id.length === 32 && /^[0-9a-f]{32}$/.test(invitation.invite_id) && typeof invitation.token === "string" &&
+      (invitation.token.length === 0 || invitation.token.length === 64) && /^(?:[0-9a-f]{64})?$/.test(invitation.token);
+  if (!legacy && !enrollment) {
     throw new Error("This invitation is invalid. Ask your host for a new link.");
   }
   return normalized.replace(/\+/g, "-").replace(/\//g, "_");
@@ -37,7 +44,7 @@ function sessionStatus(value, session, nonce) {
       typeof value.message !== "string" || value.message.length > 500) return null;
   const address = localAddress(value.address);
   if (value.state === "connected" && !address) return null;
-  return { state: value.state, message: value.message, address, model: value.model };
+  return { state: value.state, message: value.message, address, model: value.model, enrolled: value.enrolled === true };
 }
 
 function modelStatus(value) {
@@ -59,10 +66,10 @@ function modelStatus(value) {
 }
 
 function initializePage() {
-  if (document.documentElement.dataset.connectorPage !== "3") {
+  if (document.documentElement.dataset.connectorPage !== "4") {
     const address = new URL(window.location.href);
-    if (address.searchParams.get("page") !== "3") {
-      address.searchParams.set("page", "3");
+    if (address.searchParams.get("page") !== "4") {
+      address.searchParams.set("page", "4");
       window.location.replace(address.href);
     } else {
       const status = document.getElementById("status");
@@ -83,8 +90,10 @@ function initializePage() {
   const modelFile = document.getElementById("model-file");
   const progress = document.getElementById("model-progress");
   let token;
+  let invitation;
   try {
     token = invitationToken(window.location.hash);
+    invitation = JSON.parse(atob(token.replace(/-/g, "+").replace(/_/g, "/")));
   } catch { }
   let ready = false;
   let outdated = false;
@@ -130,7 +139,7 @@ function initializePage() {
     guide.hidden = ready || !installing;
     const message = !token
       ? "Open the complete invitation link sent by your host."
-      : outdated ? "Update the connector to show connection progress here. Your invitation will still work."
+      : outdated ? "Update the connector to open this workspace and show its progress here."
       : !ready && session ? "The local connector is not responding. Open it again or reinstall it."
       : localError || (ready && session
         ? snapshot
@@ -186,7 +195,7 @@ function initializePage() {
       const nonce = randomToken();
       const value = await read("/status?nonce=" + nonce, controller.signal);
       detected = value && value.app === "hosted-comfyui-connector" && value.protocol === 1 && value.nonce === nonce;
-      capable = detected && value.live_status === 1;
+      capable = detected && value.live_status === 1 && (invitation?.version !== 2 || value.enrollment === 2);
       if (capable && requestedSession) {
         const statusNonce = randomToken();
         current = sessionStatus(await read("/session?session=" + requestedSession + "&nonce=" + statusNonce, controller.signal), requestedSession, statusNonce);
@@ -207,6 +216,13 @@ function initializePage() {
         snapshot = current;
         lastSeen = Date.now();
         localError = "";
+        if (current.enrolled && invitation?.version === 2 && invitation.token) {
+          invitation = { ...invitation, token: "" };
+          token = btoa(JSON.stringify(invitation)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+          const bookmark = new URL(window.location.href);
+          bookmark.hash = token;
+          window.history.replaceState(null, "", bookmark.href);
+        }
       } else if (snapshot && Date.now() - lastSeen >= 10000) {
         localError = "Connection status is unavailable. Click Reconnect to check the connection.";
       }

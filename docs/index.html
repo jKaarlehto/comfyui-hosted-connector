@@ -1,20 +1,21 @@
 <!doctype html>
-<html lang="en" data-connector-page="3">
+<html lang="en" data-connector-page="4">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' http://127.0.0.1:18187; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>Hosted ComfyUI</title>
-  <link rel="stylesheet" href="style.css?v=98143a4d62b97f4a72f0cb175da9b00701c2ae90fee899e006507e220e6e90bb">
-  <script src="connect.js?v=32c10981e9e2c3023f10c69efa8cfd983bcb94053e96c77ccc99ebb118b03c1e" defer></script>
+  <title>ComfyUI Notch — Connect</title>
+  <link rel="stylesheet" href="style.css?v=811193501e8aab0d8129e6669adf4a7c0203dbcff69d2ec2fb5da883fdc281ea">
+  <script src="connect.js?v=86cf15a78e7e710cf83e10099e1be0a9f83e7f0a1c8ac7ce057759be0eb4878a" defer></script>
 </head>
 <body>
   <main>
-    <h1>Hosted ComfyUI</h1>
-    <p>Connect to the workspace you were invited to. Its WebUI will open when ready.</p>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">N</span><span>ComfyUI <strong>Notch</strong></span></div>
+    <h1>Your hosted workspace</h1>
+    <p>Connect to ComfyUI from Notch and your browser.</p>
     <div class="actions">
-      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe?v=beaa4c0acb6216c391ef9b95ac4d1711c9458f53a7826f02056a82d1a09178cd" download rel="noreferrer">Download and install</a>
+      <a id="download" class="button primary" href="downloads/HostedComfyUIConnector.exe?v=77e3f0da305d11245f7c58f8821fe00ecca08b62e6a468996a5e6664721fc410" download rel="noreferrer">Download and install</a>
       <button id="connect" class="button primary" type="button" hidden disabled>Connect</button>
       <a id="open" class="button primary" target="_blank" rel="noopener noreferrer" hidden>Open ComfyUI</a>
     </div>
@@ -33,8 +34,8 @@
       <li>Confirm installation for your Windows account.</li>
       <li>This page will switch to <strong>Connect</strong> automatically.</li>
     </ol>
-    <p class="footnote">The connector starts the server and keeps a private local connection open for your browser and Notch. Startup can take a few minutes.</p>
-    <p class="footnote">Keep the connector open while working. Keep your invitation link private.</p>
+    <p class="footnote">The ComfyUI Notch Connector starts your server and keeps the connection open. Startup can take a few minutes.</p>
+    <p class="footnote">Accepted invitations appear in Saved workspaces in the connector. Keep it open while working, and keep unused invitation links private.</p>
     <noscript><p>Enable JavaScript to pass your invitation to the connector.</p></noscript>
   </main>
 </body>
