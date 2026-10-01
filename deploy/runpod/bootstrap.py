@@ -180,6 +180,12 @@ notch_stage installing_dependencies
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r "$COMFYUI_DIR/requirements.txt" || exit $?
 NOTCH_TARGET="$COMFYUI_DIR/custom_nodes/ComfyUI-Notch"
+# This is the internal source bootstrap. Registry packages belong to Manager,
+# even if a previous source installation left its Runpod ownership marker.
+if [ -f "$NOTCH_TARGET/.tracking" ]; then
+    echo "Refusing to overwrite a Registry-managed Notch plugin with source files" >&2
+    exit 1
+fi
 if [ -e "$NOTCH_TARGET" ] && [ ! -f "$NOTCH_TARGET/.runpod-managed" ]; then
     echo "Refusing to replace an unmanaged ComfyUI-Notch installation" >&2
     exit 1
@@ -190,7 +196,9 @@ touch "$NOTCH_TARGET/.runpod-managed"
 notch_stage installing_dependencies
 python -m pip install --disable-pip-version-check --no-input --prefer-binary \
     --constraint /opt/comfyui-runtime-constraints.txt -r /opt/notch-http-requirements.txt || exit $?
+# Older internal revisions still use the startup dependency installer.
 export NOTCH_AUTO_INSTALL=0
+export NOTCH_AUTO_UPDATE=0
 if [ -n "${NOTCH_GLOBAL_STORE:-}" ]; then
     notch_stage preparing_files
     python /opt/notch-model-store.py --local "$COMFYUI_DIR" --store "$NOTCH_GLOBAL_STORE/notch" --mode prepare || exit $?
