@@ -1,8 +1,9 @@
 # Comfy API publishing and development harness
 
 The production goal is a direct Comfy v2 backend in Notch's extension client,
-with an authorized API key set in Notch. Consumers install no helper app or
-bridge and use no invitation links. See [the goal and plan](PLAN.md).
+with URL/key connection and automatic workflow discovery. The consumer needs no
+workflow file or manual import and installs no helper app or bridge. Discovery
+from a managed deployment URL remains an unresolved feasibility gate. See [the goal and plan](PLAN.md).
 
 This directory contains a workflow bundle compiler, a custom-node verification
 command, and a development-only loopback bridge. The bridge exercises existing
@@ -55,11 +56,13 @@ file. The API graph itself does not tell us an arbitrary upstream socket's type:
 {"outputs": {"42": {"type": "IMAGE", "slot": "outputs.output_0"}}}
 ```
 
-Share the bundle as a file. It contains the endpoint hint, original compiled
+For development, the compiler creates a descriptor file containing the endpoint
+hint, original compiled
 workflow, stateless worker graph and named input/output bindings. It contains no
 connector API credential. Embedded credential fields are rejected. Its hash pins
 its contents; it is not a signature proving who published it. Workflow edits
-require a new published bundle.
+require a new descriptor identity. In the target product this descriptor is
+published remotely and fetched automatically; a consumer does not import it.
 
 ## Development harness authentication and connection
 

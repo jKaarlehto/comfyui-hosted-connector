@@ -1,10 +1,11 @@
 # Direct Comfy API integration goal and plan
 
 Goal: a publisher deploys a pinned ComfyUI environment with Comfy Build/Deploy
-and shares a versioned workflow bundle. An authorized user runs it in **Notch
-alone**, with an API key set in Notch and passed to the extension client in memory.
-No invitation links, Windows connector app, SSH tunnel or local bridge are part
-of the consumer flow.
+and publishes remotely discoverable workflow definitions. A consumer with no
+workflow enters only the hosted URL and an authorized API key in **Notch**.
+Notch discovers workflows/controls and passes the key to its extension client
+in memory. No manual bundle import, invitation link, Windows connector app,
+SSH tunnel or local bridge is part of the consumer flow.
 
 Research date: 2026-10-01. The supplied deploy overview and serverless quickstart,
 linked v2 API/SDK docs, v2 OpenAPI spec and local plugin/client were inspected.
@@ -13,18 +14,19 @@ support are acceptance requirements.
 
 ## Product flow
 
-1. Publisher authors and tests in ComfyUI, exports compiled API JSON and a bundle
-   containing named input/output bindings, then builds and deploys dependencies.
-   A Build is an environment; a deployment can execute multiple API graphs.
-2. Publisher distributes the bundle as a file or ordinary download. No enrollment
-   token or API key accompanies it. Optional discovery/catalog work is later.
-3. User imports it in Notch, confirms the endpoint, and enters an authorized Comfy
-   API key in the connection settings. Notch offers Test Connection, Save Key,
-   Replace Key and Forget Key. Store secrets in the OS credential store, scoped
-   to the selected endpoint/account. Workflow/DFX stores only a connection reference.
-4. Notch passes the selected endpoint and key to the SDK in memory. The native v2
-   client uploads assets, submits the bound API graph, polls/cancels durable jobs,
-   and downloads outputs. Host encodes images and decodes returned media.
+1. Publisher authors/tests workflows and deploys dependencies with Comfy Build.
+   The publisher's compiled graphs and named bindings must be published as
+   remotely discoverable metadata. The existing bundle compiler produces this
+   metadata for development; its file is not a required consumer input.
+2. Consumer opens Notch's connection settings, enters the hosted URL and an API
+   key, and connects. They do not need a workflow, download or import step.
+   Notch offers Save Key, Replace Key and Forget Key; store secrets in the OS
+   credential store scoped to endpoint/account. Workflow/DFX stores a reference.
+3. Client discovers the publisher's available workflows and input/output controls.
+   Select the single/default workflow, or offer a chooser for several workflows.
+   Fetch/cache the graph and bindings automatically, with a pinned identity.
+4. The native v2 client uploads assets, submits the discovered/bound graph,
+   polls/cancels durable jobs and downloads outputs. Host encodes/decodes media.
 5. Host persists submission intent before sending and the job ID before polling.
    Resume known IDs after restart; report an ambiguous submit without a job ID
    for investigation, never automatically submit another paid job. Retry read-only
@@ -39,7 +41,27 @@ and `/api/v2/jobs`. Registry installation does not prove custom route exposure.
 The managed backend therefore skips native WebSocket handshakes and runtime
 Registry updates; Build releases pin the worker environment.
 
-A versioned bundle supplies the stateless graph and bindings. Use native values,
+### URL-only workflow discovery is a feasibility gate
+
+Rechecked official docs after clarification: the deployment guide's FAQ says
+Builds may include dependencies for several workflows, then clients submit each
+API-format workflow. The SDK scope explicitly excludes saved-workflow management,
+node introspection and named parameters. `GET /api/v2/jobs/{id}/workflow` retrieves
+an already known job's graph; it cannot bootstrap a new consumer from a URL.
+
+Therefore the current documented managed v2 API does not supply the whole desired
+URL-only connection flow. Prove whether a deployed Notch custom node can expose
+workflow/catalog metadata through the managed gateway, or whether an official
+platform API provides that metadata. Neither capability is verified. If unavailable,
+design an automatic metadata source associated with the entered deployment URL.
+Do not invent managed routes, forward Comfy credentials to arbitrary metadata
+hosts, or call manual consumer bundle import a solution to this requirement.
+The native SDK execution client remains useful but is not proof of URL-only
+workflow discovery. Do not claim the full migration is feasible until this gate
+has an implemented and managed-tested path.
+
+A publisher-generated, remotely fetched descriptor supplies the stateless graph
+and bindings. Use native values,
 LoadImage and SaveImage on workers rather than Notch cache references, disk paths,
 CUDA IPC or shared-memory handles. Other Registry custom nodes stay in the graph.
 Host binding must validate published types/ranges and workflow identity before
@@ -66,23 +88,30 @@ than quietly reintroduce an invitation gateway or publisher-key distribution.
    asset upload, one-shot idempotent-key submission, polling, cancellation and
    stable-ID output downloads with credential-safe redirects. Include it in the
    vendorable SDK. No local helper or managed `/notch/*` route dependency.
-3. **Notch host integration — required.** Add the connection settings/OS key store,
-   import bundles and expose named controls, bind typed inputs, encode/decode images,
+3. **Workflow discovery — unresolved feasibility gate.** Establish an actual
+   managed-supported source of publisher graphs/bindings discoverable from the
+   entered URL. Implement fetch, schema/identity validation and workflow selection.
+   An endpoint that only supports arbitrary graph submission is insufficient.
+4. **Notch host integration — required.** Add the connection settings/OS key store,
+   automatic discovery and named controls, bind typed inputs, encode/decode images,
    persist job state, poll on a worker thread, deliver outputs and resume saved jobs.
    The host's source is outside these repositories; SDK methods alone do not finish
    the user experience. Ship via a normal Notch update, not a separate installer.
-4. **Publisher UX — required.** Add bundle export to the ComfyUI frontend. Validate
+5. **Publisher UX — required.** Add remotely discoverable publication to the
+   ComfyUI frontend. CLI bundle creation is only a development artifact. Validate
    dependencies against the pinned Build and display endpoint/bundle identity.
    Existing CLI publication is available for development; no invitation flow.
-5. **Live managed/Registry proof — required.** Publish the node pack to Registry,
+6. **Live managed/Registry proof — required.** Publish the node pack to Registry,
    install an exact version in a Build, test real text/image workflows, cold starts,
    cancellation, expiry and key rejection, and verify access/revocation/billing
    with separate accounts. No managed deployment or key is configured here.
-6. **Broader parity — later.** Audio/video/3D, batching, previews, group control and
+7. **Broader parity — later.** Audio/video/3D, batching, previews, group control and
    live editor interaction need explicit design. Initial consumer scope is images.
 
-Release acceptance: stages 3–5 must pass, with a clean Windows machine running
-only Notch, and no bridge process, invitation link or connector installation.
+Release acceptance: stages 3–6 must pass. On a clean Windows machine, a consumer
+with no workflow connects using only URL/key, discovers a published workflow and
+generates in Notch. No manual bundle import, bridge process, invitation link or
+connector installation is allowed.
 The research harness must not be presented as the completed consumer integration.
 
 ## Current evidence
