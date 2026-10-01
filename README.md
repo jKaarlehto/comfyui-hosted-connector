@@ -1,62 +1,63 @@
 # Notch workflows on Comfy API
 
-Publish a workflow and its dependencies with Comfy Build/Deploy. A user enters
-the hosted endpoint URL and an authorized API key in Notch. Notch discovers the
-publisher's workflows and controls, then the extension client runs them through
-Comfy's v2 API directly. This URL-only discovery is a required, unresolved part
-of the integration, not a feature supplied by the current SDK client.
+The goal is a native Notch flow: a publisher creates or selects a Comfy API
+deployment and publishes a Notch workflow definition; a consumer enters its
+**workflow URL** and an authorized API key in Notch. The SDK automatically loads
+the graph and controls and executes it through Comfy v2. DFX stores the complete
+snapshot and deployment reference; secrets stay in Notch's credential store.
 
-The target consumer needs **Notch only**. There are no invitation links, device
-enrollment, SSH tunnels, Windows connector app, or local bridge to install.
+The consumer needs **Notch only**. There are no invitation links, device
+enrollment, SSH tunnels, Windows connector app or local bridge to install.
 
-## Flow
+## Product flow and boundaries
 
-1. **Publish:** the owner authors workflows and deploys their models/custom nodes
-   with Comfy Build. The owner also publishes the workflow definitions and named
-   input/output metadata for automatic client discovery.
-2. **Connect in Notch:** the consumer enters the hosted endpoint URL and API key,
-   then connects. They need no workflow file and do not manually import a bundle.
-   Notch saves the key in its OS credential store and passes it to the SDK in memory.
-3. **Discover:** Notch retrieves available workflow definitions and controls,
-   selecting the single/default workflow automatically or offering a chooser.
-4. **Run:** the client binds controls/uploads to the discovered graph, submits it,
-   polls the job and downloads outputs. Saved job IDs allow recovery without a
-   second paid run.
+1. **Publisher:** author/test a workflow; package models/custom nodes with Builder,
+   cut a Linux/NVIDIA release, and deploy it on Comfy API. Reuse a compatible
+   existing deployment for additional workflows.
+2. **Workflow URL:** upload the stateless graph and named controls as a JSON asset
+   through Comfy's native API. This is Notch metadata stored in Comfy, separate
+   from the Build environment. Show its actual retention.
+3. **Consumer:** enter that workflow URL and an authorized key in Notch. The SDK
+   fetches/validates the graph and bindings automatically. No workflow file or
+   manual import is needed.
+4. **Save and run:** serialize the graph, bindings and endpoint together into DFX.
+   Bind controls, upload images, submit a job and download outputs. Persist job
+   intent/IDs to recover without submitting another paid job.
 
-**Platform gap:** Comfy Build/Deploy publishes an execution environment, not a
-saved-workflow catalog. The documented v2 API requires a graph for each submitted
-job and does not provide saved-workflow management or named workflow parameters.
-We must prove how Notch can discover the publisher's definitions from the entered
-URL. Managed exposure of custom `/notch/*` routes is unverified. If those routes
-are unavailable, another automatic metadata source is required; a bare deployment
-URL alone is insufficient under the currently documented API. Do not hide this
-limitation behind a manual consumer import step.
+**Builder packages an environment; its deployment URL can execute many graphs.**
+It does not bake in one graph, create a workflow catalog or automatically add an
+endpoint to the original local workflow JSON. A bare deployment URL is therefore
+insufficient for a consumer with no graph. The Notch workflow URL identifies its
+native definition asset. Comfy Cloud and enterprise Managed Builds are separate
+products; their capabilities must not be assumed for Comfy API deployments.
 
-Comfy supports including Registry custom nodes in Builds. The Notch nodes
-registered and executed on Linux through the official v2 proxy in local testing;
-a published `notch` Registry version and a real managed deployment are still
-needed to verify the hosted path. Cross-account authorization and billing also
-need verification. A deployment URL alone grants no access; do not share a
-publisher's account key as a substitute for consumer authorization.
+## Implementation and remaining proof
 
-## Implementation status
+[The goal and plan](deploy/comfy_api/PLAN.md) and [research coverage](deploy/comfy_api/RESEARCH.md)
+record the design and supporting sources. Native Builder/Deploy methods,
+workflow-URL parsing/loading, snapshot serialization and direct v2 execution are
+implemented in the [SDK PR](https://github.com/jKaarlehto/ComfyUI-Notch/pull/95).
+The user confirmed Notch host source is unavailable; SDK hooks are the implemented
+scope. Publish/Connect UI, OS credential storage and actual DFX resource wiring
+remain host integration work.
 
-[The goal and plan](deploy/comfy_api/PLAN.md) defines the direct client architecture
-and acceptance criteria. The native v2 API client is implemented in the separate
-[ComfyUI-Notch SDK repository](https://github.com/jKaarlehto/ComfyUI-Notch).
-Workflow discovery and the Notch product's connection UI, credential storage,
-workflow binding and job persistence integration are still required; its source
-is outside these repos.
+Native JSON asset upload/loading and image execution passed against the official
+local v2 proxy. Asset retention and access with a separate user's key must still
+be tested on managed Comfy API before offering permanent links or arbitrary
+sharing. A URL grants no access; do not distribute the owner's account key.
 
-This repository implements a bundle compiler, a managed custom-node verification
-command and a **development-only** Python bridge for exercising the existing
-extension-client protocol. That bridge is a test harness, not the new consumer
-flow or a replacement Windows app. See [prototype usage](deploy/comfy_api/README.md).
+Build supports Registry custom nodes. All five core Notch nodes registered on
+Linux; actual Notch input/output nodes executed through v2. Registry publication
+and a managed Build containing the exact published version remain required.
+
+This repository contains a bundle compiler, custom-node verification command and
+**development-only** bridge for testing the existing extension protocol. The
+bridge is a test harness. See [prototype usage](deploy/comfy_api/README.md).
 
 The previous Runpod tools, invitation service/pages, Windows app source and
-installer downloads have been removed from this repository. This source removal
-does not stop existing Pods, revoke credentials, disable an already published
-GitHub Pages site, or uninstall existing apps.
+installer downloads have been removed from this repository. Source removal does
+not stop existing Pods, revoke credentials, unpublish an existing website or
+uninstall existing apps.
 
 ## Development
 

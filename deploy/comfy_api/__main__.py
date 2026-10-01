@@ -50,14 +50,14 @@ async def recover(state, endpoint, key, submission_key, job_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Publish a Comfy API image workflow and connect it to Notch")
+    parser = argparse.ArgumentParser(description="Compile workflow metadata and exercise Comfy API for development")
     sub = parser.add_subparsers(dest="command", required=True)
-    publish = sub.add_parser("publish", help="Create a credential-free, versioned workflow bundle")
-    publish.add_argument("--workflow", type=Path, required=True)
-    publish.add_argument("--bindings", type=Path)
-    publish.add_argument("--name", required=True)
-    publish.add_argument("--output", type=Path, required=True)
-    publish.add_argument("--endpoint", required=True)
+    compile_command = sub.add_parser("compile", help="Compile a local workflow bundle; does not publish or deploy")
+    compile_command.add_argument("--workflow", type=Path, required=True)
+    compile_command.add_argument("--bindings", type=Path)
+    compile_command.add_argument("--name", required=True)
+    compile_command.add_argument("--output", type=Path, required=True)
+    compile_command.add_argument("--endpoint", required=True)
     for command in ("login", "logout", "serve", "status", "recover", "verify-plugin"):
         action = sub.add_parser(command)
         action.add_argument(
@@ -79,12 +79,12 @@ def main():
     args = parser.parse_args()
     try:
         endpoint = validate_endpoint(args.endpoint)
-        if args.command == "publish":
+        if args.command == "compile":
             workflow = json.loads(args.workflow.read_text(encoding="utf-8-sig"))
             bindings = json.loads(args.bindings.read_text(encoding="utf-8-sig")) if args.bindings else None
             bundle = compile_bundle(workflow, args.name, endpoint, bindings)
             args.output.write_text(json.dumps(bundle, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-            print(f"Published {bundle['name']}: {len(bundle['inputs'])} inputs, {len(bundle['outputs'])} image outputs")
+            print(f"Compiled {bundle['name']}: {len(bundle['inputs'])} inputs, {len(bundle['outputs'])} image outputs")
             print(f"Bundle: {args.output.resolve()}\nVersion: {bundle['bundle_id']}")
             return
         if args.command == "logout":
@@ -108,9 +108,7 @@ def main():
             return
         bundle = validate_bundle(json.loads(args.bundle.read_text(encoding="utf-8-sig")))
         if bundle["endpoint"] != endpoint:
-            raise ValueError(
-                "Selected endpoint differs from the published bundle. Republish for the intended endpoint."
-            )
+            raise ValueError("Selected endpoint differs from the compiled bundle. Recompile for the intended endpoint.")
         directory = state_directory(bundle, endpoint, args.state_dir)
         if args.command == "status":
             state = State(directory, bundle, endpoint)

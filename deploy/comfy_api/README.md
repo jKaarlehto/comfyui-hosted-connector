@@ -1,9 +1,12 @@
 # Comfy API publishing and development harness
 
-The production goal is a direct Comfy v2 backend in Notch's extension client,
-with URL/key connection and automatic workflow discovery. The consumer needs no
-workflow file or manual import and installs no helper app or bridge. Discovery
-from a managed deployment URL remains an unresolved feasibility gate. See [the goal and plan](PLAN.md).
+The native SDK now supports direct Comfy v2 execution, Builder/Deploy hooks,
+workflow definition asset URLs and credential-free snapshot persistence for DFX.
+The consumer enters a **Notch workflow URL** and authorized key; no workflow file,
+manual import, helper app or bridge is required. A bare deployment URL identifies
+an environment, not a graph. Managed definition retention and cross-account
+access remain release gates. See [the goal and plan](PLAN.md) and the SDK's
+[native publication contract](https://github.com/jKaarlehto/ComfyUI-Notch/blob/8f8ae69ef2394ba74210419702a7e52221b1d0cb/cpp/comfy_extension_client/PUBLISHING.md).
 
 This directory contains a workflow bundle compiler, a custom-node verification
 command, and a development-only loopback bridge. The bridge exercises existing
@@ -28,7 +31,7 @@ needs compilation before it can run on an endpoint.
 Package the environment with `comfy build init`, `comfy build push`, and
 `comfy build release create --target linux/nvidia --watch`. Review available GPUs,
 regions, rates and worker bounds before `comfy deploy up`. These are Comfy's
-commands; `publish` below only creates a local workflow bundle. Follow
+commands; `compile` below only creates a local workflow bundle. Follow
 [Comfy's quickstart](https://docs.comfy.org/development/serverless/quickstart).
 
 One deployment can run several workflows whose dependencies are included in its
@@ -46,7 +49,7 @@ node ID and input name, with optional label, bounds, default and COMBO options.
 The example is a model-free solid image with three integer controls:
 
 ```shell
-python -m deploy.comfy_api publish --workflow deploy/comfy_api/examples/solid-image.json --bindings deploy/comfy_api/examples/solid-bindings.json --name "Solid Image" --endpoint https://YOUR-DEPLOYMENT.run.comfy.app --output solid.notch-api.json
+python -m deploy.comfy_api compile --workflow deploy/comfy_api/examples/solid-image.json --bindings deploy/comfy_api/examples/solid-bindings.json --name "Solid Image" --endpoint https://YOUR-DEPLOYMENT.run.comfy.app --output solid.notch-api.json
 ```
 
 For modern autogrow Notch outputs, add an explicit output slot/type in the bindings
@@ -62,7 +65,10 @@ workflow, stateless worker graph and named input/output bindings. It contains no
 connector API credential. Embedded credential fields are rejected. Its hash pins
 its contents; it is not a signature proving who published it. Workflow edits
 require a new descriptor identity. In the target product this descriptor is
-published remotely and fetched automatically; a consumer does not import it.
+published as native Comfy JSON assets and fetched automatically; a consumer does
+not import it. The native SDK snapshot has its own schema containing a compiled
+graph and bindings, distinct from the bridge's development bundle. Use the
+bundle's worker graph and named inputs/outputs to construct that SDK snapshot.
 
 ## Development harness authentication and connection
 
@@ -211,7 +217,9 @@ cmake --build .local-work/comfy-api-client-smoke --target extension_client_smoke
 The native smoke uses libcurl; without the binary, that one test reports a skip.
 
 The separate direct-backend smoke needs a checkout containing the new
-`ComfyApiClient` SDK. Against an official v2 proxy or authorized deployment:
+`ComfyApiClient` and publication SDK hooks. It also uploads a native JSON
+workflow asset, automatically loads it by URL, checks credential-free serialization
+and saves its workflow snapshot/publication URL alongside the job state. Against an official v2 proxy or authorized deployment:
 
 ```shell
 cmake --build .local-work/comfy-api-client-smoke --target direct_api_smoke
@@ -223,5 +231,6 @@ Use an existing state prefix to resume its saved job. Run only one instance per
 prefix. An intent without a job ID stops the smoke rather than creating another
 job. This executable is a development proof, not a consumer helper app.
 
-Managed endpoint access, multi-account billing, Registry release installation,
+Managed definition-asset retention/access, endpoint authorization, multi-account
+billing, Registry release installation,
 cold starts and Notch host integration still require live validation.

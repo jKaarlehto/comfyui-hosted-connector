@@ -1,5 +1,5 @@
 // Direct C++ v2 client over real HTTP, with no local bridge or WebSocket.
-#include "comfy_extension_client/comfy_api.hpp"
+#include "comfy_extension_client/comfy_publish.hpp"
 #include <curl/curl.h>
 #include <chrono>
 #include <cctype>
@@ -101,6 +101,41 @@ int main(int argc, char** argv)
         ComfyApiClient client(options);
         if (!client.ValidateConfiguration()) throw std::runtime_error(client.ValidateConfiguration().ErrorMessage());
         std::string prefix = argv[3];
+        // A consumer begins with only the native definition URL and credential.
+        // DFX persistence is supplied by the SDK snapshot serializer, not by an
+        // application-specific file writer in this development smoke.
+        ComfyWorkflowSnapshot snapshot;
+        snapshot.name = "Native metadata smoke";
+        snapshot.workflow_json = "{\"1\":{\"class_type\":\"EmptyImage\",\"inputs\":{\"width\":16,\"height\":16,\"batch_size\":1,\"color\":0}},\"2\":{\"class_type\":\"SaveImage\",\"inputs\":{\"images\":[\"1\",0],\"filename_prefix\":\"metadata-smoke\"}}}";
+        snapshot.bindings_json = "{\"inputs\":{},\"outputs\":[{\"name\":\"image\",\"type\":\"IMAGE\",\"node_id\":\"2\"}]}";
+        snapshot.reference.deployment_url = options.endpoint;
+        snapshot.reference.workflow_version = "native-metadata-smoke-v1";
+        std::string workflowURL = Read(prefix + ".publication-url");
+        if (workflowURL.empty())
+        {
+            Result<ComfyWorkflowReference> published = client.PublishWorkflowSnapshot(snapshot);
+            if (!published) throw std::runtime_error(published.ErrorMessage());
+            Result<std::string> url = published.Value().PublicationURL(true);
+            if (!url) throw std::runtime_error(url.ErrorMessage());
+            workflowURL = url.Value(); Save(prefix + ".publication-url", workflowURL);
+        }
+        Result<ComfyWorkflowReference> entered = ComfyWorkflowReference::FromPublicationURL(workflowURL, true);
+        if (!entered || entered.Value().deployment_url != options.endpoint)
+            throw std::runtime_error("Saved publication URL differs from the selected endpoint");
+        // The consuming client gets its origin from the entered URL. It has no
+        // graph until LoadWorkflowSnapshot retrieves the publisher's asset.
+        ComfyApiOptions consumerOptions = options;
+        consumerOptions.endpoint = entered.Value().deployment_url;
+        ComfyApiClient consumer(consumerOptions);
+        Result<ComfyWorkflowSnapshot> fetched = consumer.LoadWorkflowSnapshot(workflowURL);
+        if (!fetched || fetched.Value().workflow_json != snapshot.workflow_json)
+            throw std::runtime_error(fetched ? "Loaded workflow differs from published graph" : fetched.ErrorMessage());
+        Result<std::string> persisted = fetched.Value().Serialize(true);
+        if (!persisted || (key && persisted.Value().find(key) != std::string::npos))
+            throw std::runtime_error("Credential-free snapshot persistence failed");
+        Save(prefix + ".workflow.json", persisted.Value());
+        std::cout << "Native JSON asset publication, URL-only definition fetch and credential-free persistence passed; retention: "
+            << (fetched.Value().reference.definition_expires_at.empty() ? "provider reports no expiry" : fetched.Value().reference.definition_expires_at) << "\n";
         std::string jobId = Read(prefix + ".job");
         if (jobId.empty())
         {
