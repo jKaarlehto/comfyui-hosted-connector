@@ -10,6 +10,11 @@ The user confirmed Notch host source is unavailable and requested SDK hooks.
 Implementation scope is the vendorable SDK and research harness, with an explicit
 contract for the unavailable host UI/DFX integration.
 
+The managed scope is **image jobs**, not full native live-connection parity.
+Host UI/DFX must explicitly select that backend and expose only its implemented
+features. Do not silently ignore unsupported live operations or fall back to
+native routes after managed requests fail.
+
 ## Chosen flow
 
 1. Resolve the author's workflow dependencies. Review unresolved classes, exact
@@ -36,7 +41,9 @@ contract for the unavailable host UI/DFX integration.
    an ambiguous submit without an ID must not silently become a second paid run.
 
 Method mapping and the DFX contract are in the SDK's
-[PUBLISHING.md](https://github.com/jKaarlehto/ComfyUI-Notch/blob/8f8ae69ef2394ba74210419702a7e52221b1d0cb/cpp/comfy_extension_client/PUBLISHING.md).
+[PUBLISHING.md](https://github.com/jKaarlehto/ComfyUI-Notch/blob/0251477473ee16701b58a162ae8c176fea251b1a/cpp/comfy_extension_client/PUBLISHING.md).
+The SDK's [backend boundaries](https://github.com/jKaarlehto/ComfyUI-Notch/blob/0251477473ee16701b58a162ae8c176fea251b1a/cpp/comfy_extension_client/BACKENDS.md) define canonical interface/capability ownership;
+host integration must follow it alongside this feature's release acceptance.
 
 ## Feasibility boundaries
 
@@ -63,6 +70,27 @@ pins/public model sources. Local scanning, private-model/blob transfer and node
 ZIP packaging remain native Builder wizard/comfy-cli publisher tasks. The host
 owns its compiler, typed binding, media encoding and actual DFX resource writes.
 
+### Frontend, native routes and previews
+
+The managed public contract is a job/asset API, not a deployed ComfyUI editor or
+our browser extension. Builder's UI configures the environment; Comfy Cloud's
+hosted editor is a separate product. The environment release is frozen, but each
+job supplies a graph. Notch's published snapshot pins graph/bindings separately.
+Frontend compilation and output metadata stamping happen before submission in
+the author's editor or Notch host, not in a worker's browser extension.
+
+Existing `Client` HTTP/WebSocket methods remain the native backend. Full native
+remote features need a persistent ComfyUI server exposing real plugin routes over
+authenticated HTTPS/WSS; these PRs do not implement that hosting path. Installing
+Registry code or keeping workers warm does not establish public route exposure.
+
+The v2 contract documents job SSE progress/previews, but permits `501` when the
+deployment lacks streaming. The current SDK has no SSE implementation. Future
+support needs an incremental streaming transport/event parser and managed preview
+tests, separate from native WebSocket handling. Polling remains authoritative and
+reconnection must never submit another job. A requirement for live previews is
+not met by silently continuing without them.
+
 ## Status and acceptance
 
 1. **Research reviewed:** Builder page, all serverless/deploy guides, all six
@@ -85,13 +113,18 @@ owns its compiler, typed binding, media encoding and actual DFX resource writes.
    in a Build, and test managed node execution, JSON assets, retention, another
    account's authorization/billing, rejection/revocation, cold starts and expiry.
    No managed endpoint/key is configured here.
-7. **Broader parity later:** audio/video/3D, batches, live previews, groups and
-   editor interaction. Initial managed scope is image workflows.
+7. **Separate capability work:** optional job SSE previews require implementation
+   and managed proof. Native live protocol/editor parity needs a proven persistent
+   hosting path. Audio/video/3D, batches and groups remain outside image-job scope.
 
 Release acceptance: a consumer on a clean Windows machine with Notch installed,
 no graph, and a workflow URL/key connects and generates. A saved DFX reopens with
 its embedded graph and the recipient's credential. No helper, manual import or
 invitation. Host wiring and managed/Registry gates must pass before release.
+Acceptance also requires explicit managed backend selection in UI/DFX and clear
+unavailability of native live/editor operations. This accepts a managed image-job
+mode, not full connector parity. If live preview/interactive behavior is required
+for a complete replacement, add and pass its separate acceptance checks first.
 
 ## Evidence and constraints
 
@@ -107,6 +140,9 @@ Linux ComfyUI 0.37.0 registered all five core Notch nodes; a v2 job executing
 NotchSingleInput and NotchOutputNode produced an image. HTTP output requires
 `preview: true` for v2 image discovery. Registry `notch` lookup returned 404 and
 its versions list was empty on 2026-10-01. Managed Registry execution is untested.
+That output flag proves image-asset discovery, not progressive previews, SSE or
+direct plugin/WebSocket access. Local bridge WebSocket proof is also not managed
+route/streaming proof.
 
 Both API surfaces are beta. Runtime uses bearer auth; workspace publication uses
 `X-API-Key`. Credential headers stay on selected origins and external HTTPS asset

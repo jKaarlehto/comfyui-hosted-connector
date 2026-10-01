@@ -6,7 +6,15 @@ The consumer enters a **Notch workflow URL** and authorized key; no workflow fil
 manual import, helper app or bridge is required. A bare deployment URL identifies
 an environment, not a graph. Managed definition retention and cross-account
 access remain release gates. See [the goal and plan](PLAN.md) and the SDK's
-[native publication contract](https://github.com/jKaarlehto/ComfyUI-Notch/blob/8f8ae69ef2394ba74210419702a7e52221b1d0cb/cpp/comfy_extension_client/PUBLISHING.md).
+[native publication contract](https://github.com/jKaarlehto/ComfyUI-Notch/blob/0251477473ee16701b58a162ae8c176fea251b1a/cpp/comfy_extension_client/PUBLISHING.md).
+
+The SDK [backend boundaries](https://github.com/jKaarlehto/ComfyUI-Notch/blob/0251477473ee16701b58a162ae8c176fea251b1a/cpp/comfy_extension_client/BACKENDS.md) define feature ownership.
+This managed feature covers image jobs. It does not expose the ComfyUI editor,
+native plugin HTTP/WebSocket sessions or live previews. The environment is pinned,
+but each job supplies its graph; frontend compilation happens before submission.
+Future job SSE previews need a streaming implementation and managed verification,
+including `501` handling. Full native remote behavior needs separate persistent
+hosting with authenticated HTTPS/WSS; this harness does not provide that hosting.
 
 This directory contains a workflow bundle compiler, a custom-node verification
 command, and a development-only loopback bridge. The bridge exercises existing
@@ -150,6 +158,9 @@ Notch's HTTP image node must have `preview: true` in its stamped output config
 for v2 to discover its native image reference. With previews disabled, the node
 can write its image successfully while v2 reports no assets. The proof enables
 this flag; the bridge's compiled graphs use native SaveImage directly.
+The flag enables output-asset discovery, not progressive previews or proof of
+SSE delivery. The bridge's native WebSocket tests are a local adapter proof and
+do not establish managed access to `/ws` or `/notch/*`.
 
 ## Recovery and scope
 

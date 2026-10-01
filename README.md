@@ -6,6 +6,11 @@ deployment and publishes a Notch workflow definition; a consumer enters its
 the graph and controls and executes it through Comfy v2. DFX stores the complete
 snapshot and deployment reference; secrets stay in Notch's credential store.
 
+This is a **job-based image feature**, separate from the native live plugin
+connection. Managed Comfy API does not document public access to the editor,
+`/notch/*` or `/ws`. The SDK currently has no live preview stream. Packaging the
+plugin in Builder does not establish those capabilities.
+
 The consumer needs **Notch only**. There are no invitation links, device
 enrollment, SSH tunnels, Windows connector app or local bridge to install.
 
@@ -30,6 +35,14 @@ endpoint to the original local workflow JSON. A bare deployment URL is therefore
 insufficient for a consumer with no graph. The Notch workflow URL identifies its
 native definition asset. Comfy Cloud and enterprise Managed Builds are separate
 products; their capabilities must not be assumed for Comfy API deployments.
+
+The frozen part is the environment release. Each job still supplies its graph;
+our shared Notch snapshot versions that graph separately. Authoring/compilation
+happens in the editor or Notch host, not a managed worker's browser frontend.
+Full native remote behavior needs a persistent ComfyUI server with authenticated
+HTTPS/WSS access. That hosting path is separate work, not provided by these PRs.
+Optional v2 SSE previews also need implementation and managed testing; they are
+job-scoped and may be unavailable (`501`).
 
 ## Implementation and remaining proof
 

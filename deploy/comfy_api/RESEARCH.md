@@ -30,6 +30,13 @@ Builder product page:
 - [Builder](https://comfy.org/platform/builder/): local Build packaging versus
   deployment on Comfy API, custom nodes and dependency resolution, and the
   enterprise boundary on Managed Builds team sharing/governance.
+- [Platform home](https://platform.comfy.org/profile/home) and the user-provided
+  marketing screenshot: **Deploy your workflow as an API**, with install scan,
+  Linux/NVIDIA release creation and `deploy up` returning a Build endpoint.
+  **Upload a workflow** is explained by the deployment guide as preselection of
+  environment dependencies; clients still submit API graphs. The screenshot
+  establishes neither public editor/plugin routes nor bare-URL graph discovery.
+  The public page shell was inspected; an authenticated wizard was not tested.
 
 All English pages in the source documentation's serverless section:
 
@@ -94,6 +101,14 @@ up/runtime/run/type/progress commands. These establish:
   signed download URL's expiry is distinct from the asset's retention.
 - Runtime scope excludes saved-workflow management, node introspection and named
   parameters. A known job's workflow route cannot bootstrap a new consumer.
+- The managed public contract is the job/asset surface, without a documented
+  deployed browser editor, native `/ws` or `/notch/*` forwarding. Worker node
+  installation does not establish public access to those interfaces.
+- `GET /api/v2/jobs/{id}/events` documents job SSE progress/previews/output hints
+  and a `501 not_implemented` response where streaming is unavailable. The
+  current native SDK has no SSE transport/parser. Its finite HTTP transport
+  must not be mistaken for an incremental stream. Native WebSocket protocol
+  tests and final output assets do not prove managed SSE.
 
 ## Local proof and open questions
 
@@ -119,6 +134,10 @@ Managed validation must answer:
    that. Registry `notch` had no public version at review time.
 4. Are the control-plane hooks enabled for the intended account? Build/Deploy is
    limited beta. Its CLI-backed surface needs a live integration check.
+5. For a separate future managed preview feature, does the actual target stream
+   SSE and do its workflows produce previews? Test `501`, reconnects and
+   authoritative polling. Full native editor/plugin sessions require a different
+   persistent hosting/interface path, not inference from a successful image job.
 
 No managed endpoint/key or Notch host source is available in this workspace.
 The SDK implementation and source retirement are reviewable draft PRs; complete
