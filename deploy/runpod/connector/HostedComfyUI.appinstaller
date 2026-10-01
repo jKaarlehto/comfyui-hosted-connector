@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller xmlns="http://schemas.microsoft.com/appx/appinstaller/2018" Uri="@BASE_URL@/HostedComfyUI.appinstaller" Version="@VERSION@">
+  <MainPackage Name="HostedComfyUIConnector" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64" Uri="@BASE_URL@/HostedComfyUI.msix" />
+  <UpdateSettings><OnLaunch HoursBetweenUpdateChecks="12" /><AutomaticBackgroundTask /></UpdateSettings>
+</AppInstaller>

@@ -1,85 +1,39 @@
-# Notch workflows on Comfy API
+# ComfyUI Notch Connector
 
-The goal is a native Notch flow: a publisher creates or selects a Comfy API
-deployment and publishes a Notch workflow definition; a consumer enters its
-**workflow URL** and an authorized API key in Notch. The SDK automatically loads
-the graph and controls and executes it through Comfy v2. DFX stores the complete
-snapshot and deployment reference; secrets stay in Notch's credential store.
+Run a private ComfyUI server on Runpod and share access through individual invitation links. The Windows connector starts the server and opens an authenticated SSH tunnel. Notch and the browser connect to ordinary local HTTP at `127.0.0.1:18188`.
 
-This is a **job-based image feature**, separate from the native live plugin
-connection. Managed Comfy API does not document public access to the editor,
-`/notch/*` or `/ws`. The SDK currently has no live preview stream. Packaging the
-plugin in Builder does not establish those capabilities.
+If the stopped Pod's GPU is unavailable, the starter creates a replacement using the workspace's persistent storage and configured GPU fallbacks. It retires the old Pod after verifying the replacement, and existing invitation links continue to work. See [GPU recovery](deploy/runpod/README.md#gpu-recovery) for limits and owner controls.
 
-The consumer needs **Notch only**. There are no invitation links, device
-enrollment, SSH tunnels, Windows connector app or local bridge to install.
+- **Owners:** open [manage_hosted_comfyui.bat](deploy/runpod/manage_hosted_comfyui.bat) for setup, server controls, invitations and revocation. See the [setup and usage guide](deploy/runpod/README.md) for prerequisites and defaults.
+- **Testers:** open the private invitation sent by the owner. The [connection page](https://jkaarlehto.github.io/comfyui-hosted-connector/) offers the connector installer when needed, then follows startup and model downloads. Once connected it shows the local address and an Open ComfyUI button. Keep the connector open while using ComfyUI.
 
-## Product flow and boundaries
+Connector 1.1.1 automatically saves both existing reusable invitations and new one-time invitations under **Saved workspaces**. Open the connector and select a workspace to reconnect without finding the original link. Existing saved reusable invitations are imported locally on startup; credentials are encrypted for the current Windows account and `.env` keeps only a nonsecret bookmark.
 
-1. **Publisher:** author/test a workflow; package models/custom nodes with Builder,
-   cut a Linux/NVIDIA release, and deploy it on Comfy API. Reuse a compatible
-   existing deployment for additional workflows.
-2. **Workflow URL:** upload the stateless graph and named controls as a JSON asset
-   through Comfy's native API. This is Notch metadata stored in Comfy, separate
-   from the Build environment. Show its actual retention.
-3. **Consumer:** enter that workflow URL and an authorized key in Notch. The SDK
-   fetches/validates the graph and bindings automatically. No workflow file or
-   manual import is needed.
-4. **Save and run:** serialize the graph, bindings and endpoint together into DFX.
-   Bind controls, upload images, submit a job and download outputs. Persist job
-   intent/IDs to recover without submitting another paid job.
+After the owner configures the access gateway, new invitations contain a one-time enrollment token. Connector 1.1 generates its own SSH key and saves its enrolled device credential locally. The owner can revoke invitations and devices through the gateway without starting the GPU. Without gateway setup, `share` still issues the existing reusable invitations; those remain valid until explicitly revoked. Keep all links private. Owner credentials, private SSH keys and deployment state stay in Git-ignored `.env` and `.runpod/` files. The new flow requires deploying the gateway, applying the GPU template and publishing the 1.1 connector; source changes alone do not enable it for an existing deployment.
 
-**Builder packages an environment; its deployment URL can execute many graphs.**
-It does not bake in one graph, create a workflow catalog or automatically add an
-endpoint to the original local workflow JSON. A bare deployment URL is therefore
-insufficient for a consumer with no graph. The Notch workflow URL identifies its
-native definition asset. Comfy Cloud and enterprise Managed Builds are separate
-products; their capabilities must not be assumed for Comfy API deployments.
+## Repository layout
 
-The frozen part is the environment release. Each job still supplies its graph;
-our shared Notch snapshot versions that graph separately. Authoring/compilation
-happens in the editor or Notch host, not a managed worker's browser frontend.
-Full native remote behavior needs a persistent ComfyUI server with authenticated
-HTTPS/WSS access. That hosting path is separate work, not provided by these PRs.
-Optional v2 SSE previews also need implementation and managed testing; they are
-job-scoped and may be unavailable (`501`).
+| Path | Purpose |
+| --- | --- |
+| `deploy/runpod/` | Runpod deployment, startup, storage, parking, owner/tester helpers and tests |
+| `deploy/runpod/connector/` | Windows connector source, tests and packaging |
+| `deploy/runpod/site/` | Invitation page source |
+| `deploy/gateway/` | Cloudflare invitation enrollment, device access and starter gateway |
+| `docs/` | Published page and connector downloads; the only GitHub Pages source |
 
-## Implementation and remaining proof
-
-[The goal and plan](deploy/comfy_api/PLAN.md) and [research coverage](deploy/comfy_api/RESEARCH.md)
-record the design and supporting sources. Native Builder/Deploy methods,
-workflow-URL parsing/loading, snapshot serialization and direct v2 execution are
-implemented in the [SDK PR](https://github.com/jKaarlehto/ComfyUI-Notch/pull/95).
-The user confirmed Notch host source is unavailable; SDK hooks are the implemented
-scope. Publish/Connect UI, OS credential storage and actual DFX resource wiring
-remain host integration work.
-
-Native JSON asset upload/loading and image execution passed against the official
-local v2 proxy. Asset retention and access with a separate user's key must still
-be tested on managed Comfy API before offering permanent links or arbitrary
-sharing. A URL grants no access; do not distribute the owner's account key.
-
-Build supports Registry custom nodes. All five core Notch nodes registered on
-Linux; actual Notch input/output nodes executed through v2. Registry publication
-and a managed Build containing the exact published version remain required.
-
-This repository contains a bundle compiler, custom-node verification command and
-**development-only** bridge for testing the existing extension protocol. The
-bridge is a test harness. See [prototype usage](deploy/comfy_api/README.md).
-
-The previous Runpod tools, invitation service/pages, Windows app source and
-installer downloads have been removed from this repository. Source removal does
-not stop existing Pods, revoke credentials, unpublish an existing website or
-uninstall existing apps.
+The ComfyUI plugin is maintained separately in [ComfyUI-Notch](https://github.com/jKaarlehto/ComfyUI-Notch). This repository has no Notch engine source dependency.
 
 ## Development
 
-Python 3.11 or newer:
+The Python helpers use the standard library and require Python 3.10 or newer. Windows owner tools also need GitHub CLI and OpenSSH. Page tests use Node.js; connector builds use the .NET Framework compiler included with Windows. MSIX packaging additionally needs the Windows SDK and a trusted signing certificate for distribution.
 
-```shell
-python -m pip install -r deploy/comfy_api/requirements.txt
-python -m unittest deploy.comfy_api.test_bundle deploy.comfy_api.test_bridge deploy.comfy_api.test_auth
+From the repository root:
+
+```powershell
+python -m unittest discover -s deploy/runpod -p "test_*.py"
+node deploy/runpod/test_site.js
+powershell -NoProfile -File deploy/runpod/test_owner_menu.ps1
+powershell -NoProfile -File deploy/runpod/connector/build.ps1 -OutputDirectory .local-work/connector -SiteUrl https://jkaarlehto.github.io/comfyui-hosted-connector/ -Test
 ```
 
-The [prototype guide](deploy/comfy_api/README.md) also describes the actual C++
-extension-client smoke test and custom-node proof.
+See the [publication instructions](deploy/runpod/README.md#publishing-the-invitation-page) before updating the website or downloads.
