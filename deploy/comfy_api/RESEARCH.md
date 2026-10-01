@@ -119,6 +119,51 @@ managed deployment. Native JSON asset upload, URL-only loading and credential-fr
 snapshot persistence passed through the actual official local v2 proxy. Image
 generation/polling/download and Notch custom-node execution also passed locally.
 
+## Authenticated platform checks, 2026-10-01
+
+An authorized user key was tested without including it in source or this report.
+The actual C++ `ComfyPublishClient` successfully listed Builds and deployments;
+both lists were empty. Raw platform checks also confirmed compute catalog access
+and workflow dependency resolution. Builder reported `NotchOutputNode` as missing
+and unresolved, so an automatic Registry-based import cannot yet package it.
+
+The actual C++ `ComfyApiClient` passed against **Comfy Cloud**, a separate target:
+JSON definition upload, URL-only snapshot loading, credential-free serialization,
+PNG upload, LoadImage/SaveImage execution, polling and output download. The output
+is 16×16 and matches the uploaded pixels. A saved-job rerun uses reads without a
+new submission. Invalid credentials receive 401; an authenticated unknown asset
+returns 404, consistent with treating that probe as inconclusive.
+
+The live receiver initially rejected SDK uploads with `422 invalid_body` because
+`content_type` followed the file field. Metadata now precedes the file in the SDK
+multipart body; the regenerated header and native regression checks pass. Native
+JSON assets are accepted on Cloud, but its responses omit retention, so the SDK
+reports unknown retention rather than a permanent publication.
+
+There was no existing serverless endpoint to test. After approval, the C++ hooks
+created and remotely validated a model-free Build using ComfyUI `v0.37.0` and
+plugin commit `3bc6fdc56dab97d95671a100990f315311e5e25f`, then cut one Linux/NVIDIA
+release. It failed at assembly because the GitHub repository is private and the
+builder could not fetch it. The repository remains private; no Registry release
+was published.
+
+The approved commit was archived from tracked files, excluding `.env` and local
+state, for private node-blob packaging through official comfy-cli `1.22.0`.
+That upload was rejected by GCS with `400 MalformedSecurityHeader`; no second
+release was cut. A tiny upload probe reproduced the rejection independently of
+node package size: storage reports a signed header missing from the request.
+No serverless deployment or GPU compute was created. Actual
+Linux/NVIDIA custom-node execution, serverless asset retention and cross-account
+access remain gates. Private blob packaging also would not prove Registry-version
+installation.
+
+Test resources retained for diagnosis (one failed release, no deployment):
+
+- Build: `27031e14-dad3-4e3c-bd08-9446a9fd9ede`
+- Release: `584d7c87-25b2-474c-8da8-d463cb2b0274`
+
+## Remaining managed validation
+
 Managed validation must answer:
 
 1. Can a different authorized user's key read the publisher's definition asset
@@ -139,6 +184,7 @@ Managed validation must answer:
    authoritative polling. Full native editor/plugin sessions require a different
    persistent hosting/interface path, not inference from a successful image job.
 
-No managed endpoint/key or Notch host source is available in this workspace.
+Platform/Cloud key access has been verified. No serverless endpoint or Notch host
+source is available in this workspace.
 The SDK implementation and source retirement are reviewable draft PRs; complete
 consumer shipping remains gated on these managed tests and host wiring.

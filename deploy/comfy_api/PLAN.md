@@ -102,7 +102,9 @@ not met by silently continuing without them.
 3. **Publication/persistence SDK implemented:** dependency/model resolution,
    Build/release create/status, paginated selection/recovery, compute catalog
    and estimate, deployment create/status/pause/resume, JSON definition assets,
-   workflow-URL loading and snapshot serialization. No real deployment created.
+   workflow-URL loading and snapshot serialization. Live Build creation,
+   validation and release requests passed; the release failed because Builder
+   cannot fetch the private Git repository. No real deployment created.
 4. **Research harness implemented:** stateless compiler, custom-node proof and
    development-only bridge. CLI `compile` creates a local bundle, not a deployment
    or cloud publication.
@@ -112,7 +114,10 @@ not met by silently continuing without them.
 6. **Managed/Registry proof required:** publish `notch`, pin that exact version
    in a Build, and test managed node execution, JSON assets, retention, another
    account's authorization/billing, rejection/revocation, cold starts and expiry.
-   No managed endpoint/key is configured here.
+   An authorized key has passed live Builder/Deploy listing and Comfy Cloud
+   publication/execution checks. The account has no existing serverless endpoint;
+   one test Build/release was created, but Git assembly and subsequent private
+   blob upload failed. No serverless deployment or GPU compute was created.
 7. **Separate capability work:** optional job SSE previews require implementation
    and managed proof. Native live protocol/editor parity needs a proven persistent
    hosting path. Audio/video/3D, batches and groups remain outside image-job scope.
