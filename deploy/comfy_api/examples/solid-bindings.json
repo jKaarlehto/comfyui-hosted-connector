@@ -1,0 +1,7 @@
+{
+  "inputs": {
+    "width": {"node_id": "1", "input": "width", "type": "INT", "min": 1, "max": 4096},
+    "height": {"node_id": "1", "input": "height", "type": "INT", "min": 1, "max": 4096},
+    "color": {"node_id": "1", "input": "color", "type": "INT", "min": 0, "max": 16777215}
+  }
+}

@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.15)
+project(notch_comfy_api_smoke LANGUAGES CXX)
+if(NOT NOTCH_CLIENT_DIR)
+    message(FATAL_ERROR "Set NOTCH_CLIENT_DIR to ComfyUI-Notch/cpp/comfy_extension_client")
+endif()
+find_package(CURL REQUIRED)
+add_subdirectory("${NOTCH_CLIENT_DIR}" notch_client EXCLUDE_FROM_ALL)
+add_executable(extension_client_smoke extension_client_smoke.cpp)
+target_link_libraries(extension_client_smoke PRIVATE comfy_extension_client CURL::libcurl)
+
+add_executable(direct_api_smoke direct_api_smoke.cpp)
+target_link_libraries(direct_api_smoke PRIVATE comfy_extension_client CURL::libcurl)
