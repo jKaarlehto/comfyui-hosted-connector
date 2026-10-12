@@ -31,6 +31,15 @@ try {
     Assert-True $failed 'Native process failure was ignored.'
     Assert-True ((Get-Location).Path -eq $location) 'Working directory was not restored after failure.'
 
+    New-Item -ItemType Directory -Path $script:StateDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $script:StateDir 'state.json') -Value '{"guests":{"cli-test":{}}}'
+    $rootCli = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../manage.bat'))
+    $listed = & $rootCli list -StateDir $script:StateDir -EnvFile $script:EnvFile
+    Assert-True ($LASTEXITCODE -eq 0) 'Root CLI list failed with paths containing spaces.'
+    Assert-True (($listed -join "`n") -match 'cli-test') 'Root CLI did not use the selected state directory.'
+    $invalid = & $rootCli invite '../escape' -StateDir $script:StateDir -EnvFile $script:EnvFile
+    Assert-True ($LASTEXITCODE -eq 1) 'Root CLI did not report invitation failure.'
+
     $script:Calls = New-Object Collections.Generic.List[string]
     $script:Answers = New-Object Collections.Generic.Queue[string]
     function Invoke-OwnerHelper([string]$Helper, [string[]]$Arguments) { $script:Calls.Add($Helper + ':' + ($Arguments -join '|')) }
@@ -53,9 +62,13 @@ try {
     & $invokeAction '7'
     Assert-True (($script:Calls -join ',') -eq 'runpod.py:deploy,hosted.py:setup') 'Setup/deploy routing failed.'
     $script:Calls.Clear()
+    $share = Join-Path $script:StateDir 'shares/alice'
+    New-Item -ItemType Directory -Path $share -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $share 'invitation-link.txt') -Value 'https://example.test/#fixture'
     $script:Answers.Enqueue('alice')
     & $invokeAction '8'
-    Assert-True (($script:Calls -join ',') -eq 'hosted.py:share|--guest|alice,open') 'Share must finish before opening its folder.'
+    Assert-True (($script:Calls -join ',') -eq 'hosted.py:invite|--guest|alice') 'Invitation must use automatic preparation.'
+    Assert-True ($script:Clipboard -eq 'https://example.test/#fixture') 'New invitation link was not copied.'
     $script:Calls.Clear()
     $script:Answers.Enqueue('alice')
     $script:Answers.Enqueue('y')
@@ -86,6 +99,21 @@ try {
     $script:Answers.Enqueue('y')
     & $invokeAction 'R'
     Assert-True (($script:Calls -join ',') -eq ('hosted.py:setup-gateway,hosted.py:devices,hosted.py:devices,hosted.py:revoke-device|--device|' + ('a' * 32))) 'Gateway menu routing failed.'
+
+    $script:Calls.Clear()
+    $script:Answers.Enqueue('')
+    $script:Answers.Enqueue('alice')
+    $script:Answers.Enqueue('')
+    $script:Answers.Enqueue('0')
+    Show-OwnerMenu
+    Assert-True (($script:Calls -join ',') -eq 'hosted.py:invite|--guest|alice,close') 'Enter must create an invitation.'
+
+    $script:Clipboard = 'unchanged'
+    function Invoke-OwnerHelper { throw 'simulated helper failure' }
+    $failed = $false
+    try { New-TesterInvitation 'alice' } catch { $failed = $true }
+    Assert-True $failed 'Invitation failure was ignored.'
+    Assert-True ($script:Clipboard -eq 'unchanged') 'A failed invitation copied the stale link.'
 
     $script:Calls.Clear()
     function Invoke-OwnerAction { throw 'simulated action failure' }

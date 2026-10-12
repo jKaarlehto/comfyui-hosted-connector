@@ -43,6 +43,14 @@ class GuestLifecycleTests(unittest.TestCase):
             ):
                 hosted.invite(args, "owner", state, root / "state.json")
                 folder = hosted.guest_folder(args)
+                original_link = (folder / "invitation-link.txt").read_text()
+                payload = json.loads(base64.b64decode((folder / "invitation.txt").read_text()))
+                self.assertEqual(set(payload), {"version", "endpoint", "key", "ssh_key"})
+                self.assertEqual(payload["endpoint"], "starter")
+                state["pod_id"] = "replacement"
+                hosted.invite(args, "owner", state, root / "state.json")
+                self.assertEqual((folder / "invitation-link.txt").read_text(), original_link)
+                self.assertEqual(len(identities), 1)
                 (folder / "notes.txt").write_text("Keep this unrelated file")
                 old_public = state["guests"]["alice"]["public_key"]
                 hosted.revoke(args, "owner", state, root / "state.json")

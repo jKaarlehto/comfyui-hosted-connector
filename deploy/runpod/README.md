@@ -34,23 +34,36 @@ After gateway setup, new links contain a one-time enrollment token. The connecto
 
 ## Owner setup
 
-On Windows, double-click `manage_hosted_comfyui.bat`. Its menu stays open after success or failure. Closing it closes its owner tunnel. Choose **G** to sign in to GitHub, **A** to configure the invitation gateway, **8** to create an invitation, **L** to copy its private link, **I** to list invitations, **9** to revoke an invitation, **D** to list enrolled devices or **R** to revoke a device. Gateway invitation and device management work while the GPU Pod is stopped.
+From the repository root on Windows:
+
+```powershell
+.\manage invite niko
+.\manage revoke niko
+.\manage list
+```
+
+`invite` creates the tester's invitation and copies its private link to the clipboard. It prepares missing workspace storage, template and starter, then starts the workspace when SSH access must be updated. If the parked Pod is unavailable, it uses the same recovery process as the tester connector, waits for a healthy replacement and updates access on the current Pod. Startup uses the saved GPU and price limits and incurs GPU charges while running. Existing reusable invitations and unused gateway invitations are reused; expired or redeemed gateway invitations get a new enrollment link. The link is also saved in `.runpod/shares/niko/invitation-link.txt`.
+
+`revoke` also starts or recovers the workspace when removing reusable SSH access requires it. Gateway invitations and devices can be managed while the GPU is stopped. For an already enrolled gateway device, use `.\manage devices` and `.\manage revoke-device DEVICE_ID`; revoking its enrollment invitation alone does not remove device access. Existing SSH sessions last until closed or parked.
+
+Invitation links identify the workspace starter or gateway, with no Pod ID or SSH address. They remain valid across Pod replacement within the same workspace. Replacing the starter/gateway or revoking the invitation is separate from replacing a GPU Pod.
+
+Run `.\manage` or double-click `manage_hosted_comfyui.bat` for the menu. Press **Enter** and enter a tester name to create and copy an invitation. **M** shows advanced setup and controls, including GitHub sign-in and optional gateway setup. The menu stays open after success or failure; closing it closes its owner tunnel. Use `-StateDir PATH` and `-EnvFile PATH` with the root CLI for a different private deployment.
 
 Install Python 3.10+, GitHub CLI and Windows OpenSSH. Authenticate GitHub CLI with access to the private plugin repository. Set `RUNPOD_API_KEY` in the environment or an owner-only `.env` file. The helper prompts for it when run interactively without either, saves the entered value to `.env` and skips that prompt on later runs. It updates only `RUNPOD_API_KEY` and preserves other settings.
 
 The same operations are available from the connector repository root:
 
 ```powershell
-python deploy/runpod/runpod.py setup
-python deploy/runpod/runpod.py deploy
-python deploy/runpod/runpod.py connect --background
-python deploy/runpod/hosted.py setup
-python deploy/runpod/hosted.py setup-gateway
-python deploy/runpod/hosted.py share --guest alice
+python deploy/runpod/hosted.py invite --guest alice
+python deploy/runpod/hosted.py revoke --guest alice
+python deploy/runpod/hosted.py list
 python deploy/runpod/hosted.py link --guest alice
 python deploy/runpod/hosted.py devices
 python deploy/runpod/hosted.py revoke-device --device DEVICE_ID
 ```
+
+`share` remains an alias for `invite`. Both automatically prepare reusable access and wait up to 15 minutes; `--timeout SECONDS` changes this limit. If startup times out, retry the same command. Gateway invitations skip GPU preparation. Cloudflare gateway setup remains optional through `hosted.py setup-gateway` and requires the separate credentials below.
 
 Gateway setup also requires Node.js/npm and Cloudflare account credentials. Set `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` in the private owner `.env`; missing values are requested interactively and saved without replacing other settings. The Cloudflare token needs Workers Scripts edit access and account settings read access for the selected account. `setup-gateway` installs the pinned gateway dependencies, deploys its Worker/Durable Object, provisions a scoped starter key and stores its administrative and server keys privately. It updates the GPU template without restarting the Pod. Stop and reconnect the workspace once to apply the new SSH authorization helper before issuing device access.
 
@@ -60,7 +73,7 @@ The Pod fetches enrolled public keys every ten seconds. SSH checks the local fiv
 
 `share` also writes `invitation-link.txt`; `link` regenerates it without waking the Pod. The default site is `https://jkaarlehto.github.io/comfyui-hosted-connector/`; pass `--site-url https://your-site.example/path/` to save another HTTPS site. Links and files are private credentials and must never be published.
 
-Existing reusable invitations are listed separately and remain usable until explicitly revoked. Their revocation still requires the Pod to be running to remove its static SSH key and starter credential. Reissuing an existing reusable tester name through the gateway is refused: revoke it first or use another name. Successful revocation removes its locally generated invitation and SSH files; a failed remote update keeps the control record for retry. No existing access is automatically migrated.
+Existing reusable invitations are listed separately and remain usable until explicitly revoked. Their revocation automatically prepares the Pod to remove its static SSH key and starter credential. Reissuing an existing reusable tester name through the gateway is refused: revoke it first or use another name. Successful revocation removes its locally generated invitation and SSH files; a failed remote update keeps the control record for retry. No existing access is automatically migrated.
 
 `hosted.py setup` applies the hosted template to the existing Pod; Runpod may restart it. Wait for startup before sharing. Each setup uses its own state directory. Keep that directory, its private keys and `.env` out of source control and sharing packages.
 

@@ -1,4 +1,9 @@
 param(
+    [Parameter(Position = 0)]
+    [ValidateSet('menu', 'invite', 'revoke', 'list', 'devices', 'revoke-device')]
+    [string]$Command = 'menu',
+    [Parameter(Position = 1)]
+    [string]$Guest = '',
     [string]$StateDir = '',
     [string]$EnvFile = ''
 )
@@ -19,28 +24,35 @@ function Show-OwnerMenu {
     Write-Host 'Setup uses your GitHub CLI login for the private plugin repository.'
     Write-Host "Owner credentials: $script:EnvFile"
     Write-Host "Deployment state:  $script:StateDir"
-    Write-Host 'First time: 1 setup, 2 deploy, 7 starter, A access gateway, 8 invite.'
+    Write-Host 'Press Enter to create an invitation and copy its link.'
+    Write-Host 'Setup, startup and Pod recovery are handled automatically when needed.'
+    $advanced = $false
     try {
         while ($true) {
             Write-Host ''
-            Write-Host ' 1  Setup / update template and secrets'
-            Write-Host ' 2  Deploy a new Pod'
+            Write-Host ' 8  Create invitation and copy link (Enter)'
+            Write-Host ' L  Copy an existing invitation link'
+            Write-Host ' I  List invited testers'
             Write-Host ' 3  Show status'
-            Write-Host ' 4  Start Pod'
             Write-Host ' 5  Connect / open WebUI'
             Write-Host ' 6  Stop Pod (flush storage first)'
-            Write-Host ' 7  Setup / update tester starter'
-            Write-Host ' 8  Create / refresh tester invitation'
             Write-Host ' 9  Revoke tester invitation'
-            Write-Host ' L  Copy a private invitation link'
-            Write-Host ' I  List invited testers'
-            Write-Host ' A  Setup / update invitation gateway'
             Write-Host ' D  List enrolled devices'
             Write-Host ' R  Revoke an enrolled device'
-            Write-Host ' G  Sign in to GitHub'
+            Write-Host ' M  Show / hide advanced setup and controls'
+            if ($advanced) {
+                Write-Host ' 1  Setup / update template and secrets'
+                Write-Host ' 2  Deploy a new Pod'
+                Write-Host ' 4  Start Pod'
+                Write-Host ' 7  Setup / update tester starter'
+                Write-Host ' A  Setup / update invitation gateway'
+                Write-Host ' G  Sign in to GitHub'
+            }
             Write-Host ' 0  Exit and close owner tunnel'
             $choice = Read-Host 'Choose'
             if ($choice -eq '0') { break }
+            if ($choice -eq 'M') { $advanced = !$advanced; continue }
+            if (!$choice.Trim()) { $choice = '8' }
             try {
                 Invoke-OwnerAction $choice
             } catch {
@@ -80,12 +92,7 @@ function Invoke-OwnerAction([string]$Choice) {
         }
         '8' {
             $guest = Read-GuestName
-            Write-Host 'Creating a private invitation. Gateway invitations work while the Pod is stopped.'
-            Invoke-OwnerHelper 'hosted.py' @('share', '--guest', $guest)
-            $folder = Join-Path $script:StateDir "shares/$guest"
-            Write-Host "Send the private invitation link, or the launcher files and invitation.txt from: $folder"
-            Write-Host 'The invitation is private to this tester. Do not share the owner .env or state.'
-            Start-Process -FilePath explorer.exe -ArgumentList ('"' + $folder + '"') | Out-Null
+            New-TesterInvitation $guest
         }
         '9' {
             $guest = Read-GuestName
@@ -128,6 +135,20 @@ function Invoke-OwnerAction([string]$Choice) {
             }
         }
         default { Write-Host 'Choose one of the listed actions.' }
+    }
+}
+
+function New-TesterInvitation([string]$Name) {
+    if ($Name -notmatch '^[a-zA-Z0-9_-]{1,48}$') { throw 'Use 1-48 letters, numbers, underscores or hyphens for the tester name.' }
+    Write-Host 'Creating a private invitation; preparing the workspace automatically if needed.'
+    Invoke-OwnerHelper 'hosted.py' @('invite', '--guest', $Name)
+    $path = Join-Path $script:StateDir "shares/$Name/invitation-link.txt"
+    try {
+        $link = Get-Content -LiteralPath $path -Raw
+        Set-Clipboard -Value $link.Trim()
+        Write-Host "Invitation link for $Name copied. Paste it into your message to the tester." -ForegroundColor Green
+    } catch {
+        Write-Host "Invitation created, but clipboard copy failed. Copy the private link from: $path" -ForegroundColor Yellow
     }
 }
 
@@ -200,4 +221,24 @@ function Require-Command([string]$Name, [string]$Help) {
     if (!(Get-Command $Name -ErrorAction SilentlyContinue)) { throw $Help }
 }
 
-if ($MyInvocation.InvocationName -ne '.') { Show-OwnerMenu }
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        switch ($Command) {
+            'menu' { if ($Guest) { New-TesterInvitation $Guest } else { Show-OwnerMenu } }
+            'invite' { New-TesterInvitation $Guest }
+            'revoke' {
+                if ($Guest -notmatch '^[a-zA-Z0-9_-]{1,48}$') { throw 'Supply the tester name: manage revoke NAME' }
+                Invoke-OwnerHelper 'hosted.py' @('revoke', '--guest', $Guest)
+            }
+            'list' { Invoke-OwnerHelper 'hosted.py' @('list') }
+            'devices' { Invoke-OwnerHelper 'hosted.py' @('devices') }
+            'revoke-device' {
+                if ($Guest -notmatch '^[a-f0-9]{32}$') { throw 'Supply a device ID from manage devices.' }
+                Invoke-OwnerHelper 'hosted.py' @('revoke-device', '--device', $Guest)
+            }
+        }
+    } catch {
+        Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
