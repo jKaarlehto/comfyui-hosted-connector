@@ -4,7 +4,7 @@ Run a private ComfyUI server on Runpod and share access through individual invit
 
 If the stopped Pod's GPU is unavailable, the starter creates a replacement using the workspace's persistent storage and configured GPU fallbacks. It retires the old Pod after verifying the replacement, and existing invitation links continue to work. See [GPU recovery](deploy/runpod/README.md#gpu-recovery) for limits and owner controls.
 
-- **Owners:** open [manage_hosted_comfyui.bat](deploy/runpod/manage_hosted_comfyui.bat) for setup, server controls, invitations and revocation. See the [setup and usage guide](deploy/runpod/README.md) for prerequisites and defaults.
+- **Owners:** run `.\manage invite niko`, `.\manage revoke niko` or `.\manage list` from the repository root. Invitation creation copies the link to your clipboard and handles missing workspace setup, startup and Pod recovery automatically. Run `.\manage` for the menu. See the [setup and usage guide](deploy/runpod/README.md) for prerequisites and defaults.
 - **Testers:** open the private invitation sent by the owner. The [connection page](https://jkaarlehto.github.io/comfyui-hosted-connector/) offers the connector installer when needed, then follows startup and model downloads. Once connected it shows the local address and an Open ComfyUI button. Keep the connector open while using ComfyUI.
 
 Connector 1.1.1 automatically saves both existing reusable invitations and new one-time invitations under **Saved workspaces**. Open the connector and select a workspace to reconnect without finding the original link. Existing saved reusable invitations are imported locally on startup; credentials are encrypted for the current Windows account and `.env` keeps only a nonsecret bookmark.

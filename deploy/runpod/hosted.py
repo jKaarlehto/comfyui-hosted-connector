@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 import urllib.parse
 import uuid
 import zlib
@@ -24,13 +25,14 @@ DEFAULT_SITE = "https://jkaarlehto.github.io/comfyui-hosted-connector/"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("setup", "setup-gateway", "share", "link", "list", "revoke", "devices", "revoke-device")
+        "command", choices=("setup", "setup-gateway", "invite", "share", "link", "list", "revoke", "devices", "revoke-device")
     )
     parser.add_argument("--state-dir", type=Path, default=Path(".runpod"))
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--guest", default="tester")
     parser.add_argument("--device", help="Enrolled device ID to revoke")
     parser.add_argument("--invite-days", type=int, default=7, choices=range(1, 31), metavar="1..30")
+    parser.add_argument("--timeout", type=int, default=900, help="Seconds to wait for workspace startup")
     parser.add_argument(
         "--starter-idle-seconds",
         type=int,
@@ -53,9 +55,13 @@ def main():
         help="Update templates and starter without restarting the existing Pod",
     )
     args = parser.parse_args()
+    if args.command == "invite":
+        args.command = "share"
+    if args.timeout <= 0:
+        parser.error("Timeout must be positive")
     args.state_dir = args.state_dir.resolve()
     state_file = args.state_dir / "state.json"
-    state = json.loads(state_file.read_text())
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
     if args.starter_idle_seconds is None:
         args.starter_idle_seconds = state.get("hosted_config", {}).get("starter_idle_seconds", 60)
     if not 1 <= args.starter_idle_seconds <= 3600:
@@ -64,6 +70,7 @@ def main():
         raise RuntimeError("Guest names must contain only letters, numbers, underscores or hyphens")
     if args.site_url:
         state["invitation_site"] = invitation_site(args.site_url)
+        args.state_dir.mkdir(parents=True, exist_ok=True)
         owner.save_state(state_file, state)
     state.setdefault("invitation_site", DEFAULT_SITE)
     if args.command == "setup-gateway":
@@ -101,14 +108,76 @@ def main():
             print(" ", name + pending)
         return
     key = owner.api_key(args.env_file)
-    if args.command != "setup" and not owner.resolve_pod(key, state, state_file):
-        raise RuntimeError("No hosted Pod found; deploy one first")
+    if args.command == "share":
+        prepare_invitation(args, key, state, state_file)
+        invite(args, key, state, state_file)
+        return
     if args.command == "setup":
         setup(args, key, state, state_file)
-    elif args.command == "share":
-        invite(args, key, state, state_file)
     else:
+        if args.guest not in state.get("guests", {}):
+            raise RuntimeError("No invitation recorded for this tester")
+        if not state.get("broker_id"):
+            raise RuntimeError("No workspace starter configured; run hosted.py setup first")
+        wait_for_workspace(args, key, state, state_file)
         revoke(args, key, state, state_file)
+
+
+def prepare_invitation(args, key, state, state_file):
+    if state.get("guests", {}).get(args.guest, {}).get("revoking"):
+        raise RuntimeError("This tester's revocation is pending; retry revoke first")
+    if state.get("config") and state["config"].get("storage") != "global":
+        raise RuntimeError("Hosted invitations require global persistent storage for Pod recovery")
+    if not state.get("template_id"):
+        print("Preparing workspace template and persistent storage...", flush=True)
+        subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("runpod.py")), "setup",
+             "--state-dir", str(args.state_dir), "--env-file", str(args.env_file)],
+            check=True,
+        )
+        state.update(json.loads(state_file.read_text()))
+    if not state.get("broker_id"):
+        print("Preparing the workspace starter...", flush=True)
+        setup(args, key, state, state_file)
+        state.update(json.loads(state_file.read_text()))
+    wait_for_workspace(args, key, state, state_file)
+
+
+def wait_for_workspace(args, key, state, state_file):
+    print("Preparing tester access; starting or recovering the workspace if needed. GPU billing applies while running.", flush=True)
+    deadline = time.monotonic() + args.timeout
+    endpoint = "/" + state["broker_id"]
+    job_id = None
+    previous_message = None
+    while time.monotonic() < deadline:
+        if job_id is None:
+            result = owner.request(key, "POST", endpoint + "/run", {"input": {"action": "connect"}}, base="https://api.runpod.ai/v2")
+            job_id = result["id"]
+        else:
+            result = owner.request(key, "GET", endpoint + "/status/" + job_id, base="https://api.runpod.ai/v2")
+        status = result.get("status")
+        message = previous_message or "Waiting for the workspace starter..."
+        if status == "COMPLETED":
+            output = result.get("output") or {}
+            if output.get("state") == "ready":
+                if not owner.resolve_pod(key, state, state_file):
+                    raise RuntimeError("The starter reported ready but the workspace Pod was not found")
+                require_running(args, key, state)
+                print("Workspace ready; updating tester access.", flush=True)
+                return
+            if output.get("state") == "unavailable":
+                raise RuntimeError("Workspace unavailable: " + output.get("message", "check the starter configuration"))
+            if output.get("state") != "starting":
+                raise RuntimeError("Workspace startup failed; inspect the starter status and retry the invitation command")
+            message = output.get("message") or "Starting the workspace..."
+            job_id = None
+        elif status not in ("IN_QUEUE", "IN_PROGRESS"):
+            raise RuntimeError("Workspace starter job failed; inspect the starter status and retry the invitation command")
+        if message != previous_message:
+            print(message, flush=True)
+            previous_message = message
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+    raise RuntimeError("Timed out preparing tester access; retry the invitation command. The workspace may still be starting.")
 
 
 def starter_source():
